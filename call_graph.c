@@ -19,6 +19,20 @@
 #include "executor/spi.h"
 #include "portability/instr_time.h"
 
+/*
+ * When enabled, this module keeps track of all the edges it has seen in a
+ * single call graph.  The edges are stored in a local hash table, which also
+ * stores how many times an edge has been called in this particular call graph,
+ * and how much time has been spent in a single edge.  Before exiting the top
+ * level function of the call graph, we store all our data into a "buffer"
+ * table inside the database.
+ *
+ * Because of the fact that we might get enabled in the middle of a call graph,
+ * we can't simply stop tracking when the module is disabled.  However, there's
+ * no need to keep track of the full call stack; just track how many times we've
+ * recursed into the top level function.
+ */
+
 PG_MODULE_MAGIC;
 
 void		_PG_init(void);
@@ -49,12 +63,6 @@ static HTAB *edge_hash_table = NULL;
 static List *call_stack = NULL;
 static Oid top_level_function_oid = InvalidOid;
 
-/*
- * Because of the fact that we might get enabled in the middle of a call graph,
- * we can't simply stop tracking when the module is disabled.  However, there's
- * no need to keep track of the full call stack; just track how many times we've
- * recursed into the top level function.
- */
 static bool tracking_current_graph = false;
 static int recursion_depth = 0;
 
@@ -170,12 +178,11 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 					recursion_depth = 1;
 					return;
 				}
-				else
-				{
-					create_edge_hash_table();
-					key.caller = InvalidOid;
-					tracking_current_graph = true;
-				}
+
+				/* Start tracking the call graph; we need to create the hash table */
+				create_edge_hash_table();
+				key.caller = InvalidOid;
+				tracking_current_graph = true;
 			}
 			else
 			{
@@ -229,14 +236,14 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			aborted = true;
 
 		case FHET_END:
+			/*
+			 * If we're not tracking this particular graph, we only need to see whether we're done
+			 * with the graph or not.
+			 */
 			if (!tracking_current_graph)
 			{
 				if (top_level_function_oid == flinfo->fn_oid)
 				{
-					/*
-					 * Not tracking this graph, just see whether we're done with the current graph (see
-					 * the comments near the beginning of the file)
-					 */
 					recursion_depth--;
 					if (recursion_depth == 0)
 						top_level_function_oid = InvalidOid;
@@ -260,13 +267,15 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 				break;
 			}
 
-			/* if the top level function finished cleanly, we can process the data */
+			/*
+			 * At this point we're done with the graph.  If the top level function exited cleanly, we can
+			 * process the data we've gathered in the hash table and add that data into the buffer table.
+			 */
 			if (!aborted)
 			{
 				/*
 				 * It is in some cases possible that process_edge_data() throws an exception.  We really need to
-				 * clean up our state in case that happens, or the backend needs to be restarted (see the checks
-				 * in call_graph_needs_fmgr_hook() ).
+				 * clean up our state in case that happens.
 				 */
 				PG_TRY();
 				{
