@@ -3,6 +3,8 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION call_graph" to load this file. \quit
 
+GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
+
 CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.0'; $$ LANGUAGE sql;
 
 CREATE SEQUENCE seqCallGraphBuffer;
@@ -60,9 +62,6 @@ _NumGraphs int;
 _ record;
 
 BEGIN
-
--- Make sure we don't generate false information
-SET LOCAL call_graph.enable TO FALSE;
 
 _NumGraphs := 0;
 
