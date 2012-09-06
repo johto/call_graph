@@ -54,6 +54,10 @@ instr_time current_self_time_start; /* we only need one variable to keep track o
 static bool
 call_graph_needs_fmgr_hook(Oid functionId)
 {
+	if (next_needs_fmgr_hook &&
+		(*next_needs_fmgr_hook) (functionId))
+		return true;
+
 	/*
 	 * It is possible that we get disabled in the middle of a call graph.  In that case, finish the call graph
 	 * at hand, but don't start tracking new ones.
@@ -153,7 +157,13 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 		{
 			bool found;
 
-			if (list_head(call_stack) != NULL)
+			if (call_stack == NIL)
+			{
+				create_edge_hash_table();
+				key.caller = InvalidOid;
+				top_level_function_oid = flinfo->fn_oid;
+			}
+			else
 			{
 				elem = linitial(call_stack);
 
@@ -162,12 +172,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 				key.caller = elem->key.callee;
 			}
-			else
-			{
-				create_edge_hash_table();
-				key.caller = InvalidOid;
-				top_level_function_oid = flinfo->fn_oid;
-			}
+
 			key.callee = flinfo->fn_oid;
 
 			elem = hash_search(edge_hash_table, (void *) &key, HASH_ENTER, &found);
@@ -198,7 +203,13 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			aborted = true;
 
 		case FHET_END:
-			Assert(list_length(call_stack) > 0);
+			/* If we're not tracking the current call graph, don't do anything. */
+			if (call_stack == NIL)
+			{
+				Assert(top_level_function == InvalidOid);
+				break;
+			}
+
 			Assert(((HashElem *) linitial(call_stack))->key.callee == flinfo->fn_oid);
 
 			elem = linitial(call_stack);
