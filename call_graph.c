@@ -48,22 +48,24 @@ static HTAB *edge_hash_table = NULL;
 
 static List *call_stack = NULL;
 static Oid top_level_function_oid = InvalidOid;
-instr_time current_self_time_start; /* we only need one variable to keep track of all self_times */
+
+/*
+ * Because of the fact that we might get enabled in the middle of a call graph,
+ * we can't simply stop tracking when the module is disabled.  However, there's
+ * no need to keep track of the full call stack; just track how many times we've
+ * recursed into the top level function.
+ */
+static bool tracking_current_graph = false;
+static int recursion_depth = 0;
+
+static instr_time current_self_time_start; /* we only need one variable to keep track of all self_times */
 
 
 static bool
 call_graph_needs_fmgr_hook(Oid functionId)
 {
-	if (next_needs_fmgr_hook &&
-		(*next_needs_fmgr_hook) (functionId))
-		return true;
-
-	/*
-	 * It is possible that we get disabled in the middle of a call graph.  In that case, finish the call graph
-	 * at hand, but don't start tracking new ones.
-	 */
-	return enable_call_graph ||
-		   top_level_function_oid != InvalidOid;
+	/* our hook needs to always be called to keep track of the call stack */
+	return true;
 }
 
 static void create_edge_hash_table()
@@ -139,7 +141,7 @@ static void process_edge_data()
 
 static void
 call_graph_fmgr_hook(FmgrHookEventType event,
-			  FmgrInfo *flinfo, Datum *private)
+			  FmgrInfo *flinfo, Datum *args)
 {
 	bool aborted = false;
 	HashKey key;
@@ -147,7 +149,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 	instr_time current_time;
 
 	if (next_fmgr_hook)
-		(*next_fmgr_hook) (event, flinfo, private);
+		(*next_fmgr_hook) (event, flinfo, args);
 
 	INSTR_TIME_SET_CURRENT(current_time);
 
@@ -159,12 +161,36 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 			if (call_stack == NIL)
 			{
-				create_edge_hash_table();
-				key.caller = InvalidOid;
 				top_level_function_oid = flinfo->fn_oid;
+
+				/* We're about to enter the top level function; check whether we've been disabled */
+				if (!enable_call_graph)
+				{
+					tracking_current_graph = false;
+					recursion_depth = 1;
+					return;
+				}
+				else
+				{
+					create_edge_hash_table();
+					key.caller = InvalidOid;
+					tracking_current_graph = true;
+				}
 			}
 			else
 			{
+				if (!tracking_current_graph)
+				{
+					/*
+					 * Not tracking this graph, just see whether we've recursed into the top level function
+					 * (see the comments near the beginning of the file)
+					 */
+					if (flinfo->fn_oid == top_level_function_oid)
+						recursion_depth++;
+
+					return;
+				}
+
 				elem = linitial(call_stack);
 
 				/* Calculate the self time we spent in the previous function (elem->key.callee in this case). */
@@ -203,11 +229,20 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			aborted = true;
 
 		case FHET_END:
-			/* If we're not tracking the current call graph, don't do anything. */
-			if (call_stack == NIL)
+			if (!tracking_current_graph)
 			{
-				Assert(top_level_function == InvalidOid);
-				break;
+				if (top_level_function_oid == flinfo->fn_oid)
+				{
+					/*
+					 * Not tracking this graph, just see whether we're done with the current graph (see
+					 * the comments near the beginning of the file)
+					 */
+					recursion_depth--;
+					if (recursion_depth == 0)
+						top_level_function_oid = InvalidOid;
+				}
+
+				return;
 			}
 
 			Assert(((HashElem *) linitial(call_stack))->key.callee == flinfo->fn_oid);
