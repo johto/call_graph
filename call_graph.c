@@ -89,7 +89,7 @@ static Datum get_session_identifier()
 	List *names;
 	Oid seqoid;
 
-	names = stringToQualifiedNameList("seqCallGraphBuffer");
+	names = stringToQualifiedNameList("call_graph.seqCallGraphBuffer");
 	seqoid = RangeVarGetRelid(makeRangeVarFromNameList(names), false);
 
 	return DirectFunctionCall1(nextval_oid, ObjectIdGetDatum(seqoid));
@@ -110,7 +110,7 @@ static void process_edge_data()
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
 
-	planptr = SPI_prepare("INSERT INTO CallGraphBuffer(CallGraphBufferID, TopLevelFunction, Caller, Callee, Calls, TotalTime, SelfTime) VALUES ($1, $2, $3, $4, $5, $6, $7)", 7, argtypes);
+	planptr = SPI_prepare("INSERT INTO call_graph.CallGraphBuffer(CallGraphBufferID, TopLevelFunction, Caller, Callee, Calls, TotalTime, SelfTime) VALUES ($1, $2, $3, $4, $5, $6, $7)", 7, argtypes);
 	if (!planptr)
 		elog(ERROR, "could not prepare an SPI plan for call graph buffer");
 
@@ -251,7 +251,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 void
 _PG_init(void)
 {
-	DefineCustomBoolVariable("call_graph.enable", "enable call_graph", "", &enable_call_graph, false, PGC_USERSET,
+	DefineCustomBoolVariable("call_graph.enable", "enable real-time tracking of function calls", "", &enable_call_graph, false, PGC_USERSET,
 							 0, NULL, NULL, NULL);
 
 	/* Install our hooks */

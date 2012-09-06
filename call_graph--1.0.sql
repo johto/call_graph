@@ -26,7 +26,7 @@ CREATE INDEX CallGraphBuffer_CallGraphBufferID_Index ON CallGraphBuffer(CallGrap
 CREATE TABLE CallGraphs(
 CallGraphID bigserial NOT NULL,
 TopLevelFunction oid NOT NULL,
-EdgesHash bytea NOT NULL,
+EdgesHash text NOT NULL,
 Calls bigint NOT NULL,
 TotalTime double precision NOT NULL,
 SelfTime double precision NOT NULL,
@@ -51,6 +51,7 @@ UNIQUE (CallGraphID, Caller, Callee)
 CREATE OR REPLACE FUNCTION ProcessCallGraphBuffers()
  RETURNS integer
  LANGUAGE plpgsql
+ SET search_path TO @extschema@
 AS $function$
 DECLARE
 _CallGraphID bigint;
@@ -66,7 +67,7 @@ SET LOCAL call_graph.enable TO FALSE;
 _NumGraphs := 0;
 
 -- The first thing we need to do is to identify the callgraph each CallGraphBufferID represents.  We currently do this by
--- calculating the SHA1 hash of the binary representation of an array that contains ROW(caller, callee) values ordered by
+-- calculating the MD5 hash of the binary representation of an array that contains ROW(caller, callee) values ordered by
 -- (caller, callee).  This hash can then be used to uniquely identify each call graph easily and efficiently.
 --
 -- In the below query, the subquery aggregates the data for each CallGraphBufferID, calculating the hash representation of
@@ -93,7 +94,7 @@ FROM (
     SELECT
         CallGraphBufferID,
         TopLevelFunction,
-        digest(array_send(array_agg(row(caller, callee) ORDER BY caller, callee)), 'sha1') AS EdgesHash,
+        md5(array_send(array_agg(row(caller, callee) ORDER BY caller, callee))) AS EdgesHash,
         MAX(CASE WHEN Caller = 0 THEN Calls     END) AS Calls,
         MAX(CASE WHEN Caller = 0 THEN TotalTime END) AS TotalTime,
         MAX(CASE WHEN Caller = 0 THEN SelfTime  END) AS SelfTime,
