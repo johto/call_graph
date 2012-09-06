@@ -1,0 +1,5 @@
+comment = 'automatically track function calls to create call graphs'
+default_version = '1.0'
+
+# we don't currently support relocatable
+# relocatable = true
