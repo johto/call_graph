@@ -181,8 +181,10 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 				/* Start tracking the call graph; we need to create the hash table */
 				create_edge_hash_table();
-				key.caller = InvalidOid;
 				tracking_current_graph = true;
+
+				/* Use InvalidOid for the imaginary edge into the top level function */
+				key.caller = InvalidOid;
 			}
 			else
 			{
