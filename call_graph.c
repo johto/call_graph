@@ -206,37 +206,37 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			INSTR_TIME_ACCUM_DIFF(elem->total_time, current_time, elem->total_time_start);
 
 			call_stack = list_delete_first(call_stack);
-			if (call_stack == NIL)
-			{
-				/* if we exited the top level function cleanly, process the data */
-				if (!aborted)
-				{
-					/*
-					 * It is in some cases possible that process_edge_data() throws an exception.  We really need to
-					 * clean up our state in case that happens, or the backend needs to be restarted (see the checks
-					 * in call_graph_needs_fmgr_hook() ).
-					 */
-					PG_TRY();
-					{
-						process_edge_data();
-					}
-					PG_CATCH();
-					{
-						destroy_edge_hash_table();
-						top_level_function_oid = InvalidOid;
-						PG_RE_THROW();
-					}
-					PG_END_TRY();
 
-					destroy_edge_hash_table();
-					top_level_function_oid = InvalidOid;
-				}
-			}
-			else
+			if (call_stack != NIL)
 			{
 				/* we're back to the previous node, start recording its self_time */
 				INSTR_TIME_SET_CURRENT(current_self_time_start);
+				break;
 			}
+
+			/* if the top level function finished cleanly, we can process the data */
+			if (!aborted)
+			{
+				/*
+				 * It is in some cases possible that process_edge_data() throws an exception.  We really need to
+				 * clean up our state in case that happens, or the backend needs to be restarted (see the checks
+				 * in call_graph_needs_fmgr_hook() ).
+				 */
+				PG_TRY();
+				{
+					process_edge_data();
+				}
+				PG_CATCH();
+				{
+					destroy_edge_hash_table();
+					top_level_function_oid = InvalidOid;
+					PG_RE_THROW();
+				}
+				PG_END_TRY();
+			}
+
+			destroy_edge_hash_table();
+			top_level_function_oid = InvalidOid;
 
 			break;
 		default:
