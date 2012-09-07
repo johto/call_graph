@@ -223,8 +223,8 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 			call_stack = lcons(elem, call_stack);
 
-			INSTR_TIME_SET_CURRENT(current_self_time_start);
 			INSTR_TIME_SET_CURRENT(elem->total_time_start);
+			memcpy(&current_self_time_start, &elem->total_time_start, sizeof(instr_time));
 		}
 			break;
 
