@@ -1,0 +1,80 @@
+;
+; callgraph.ini.sample - A sample configuration file for call graphs.
+;
+;
+; The configuration parameters are:
+;	SubGraphs:			A comma-separated list of subgraphs in the form TopLevelFunction.SubGraphEntryFunction.
+;						Note that the function names are case sensitive.  The default value is an empty list.
+;
+;
+;	EdgeColor:			The color used for edges.  Refer to the graphviz manual for more information on accepted
+;						values.  The default value is 'black'.
+;
+;	EdgeStyle:			The style used for edges.  Refer to the graphviz manual for more information on accepted
+;						values.  The default value is 'solid'.
+;
+;	EdgePenWidth:		The thickness of the pen used for drawing the edges.  The default value is 1.0.
+;
+;
+;	NodeLabel:			The label used for nodes.  The default value is FunctionName.
+;
+;	NodeShape:			The shape used for nodes.  Refer to the graphviz manual for more information on accepted
+;						values.  The default value is 'ellipse'.
+;
+;	NodeColor:			The color used for nodes.  Refer to the graphviz manual for more information on accepted
+;						values.  The default value is 'black'.
+;
+;	NodeStyle:			The style used for nodes.  Refer to the graphviz manual for more information on accepted
+;						values.  The default value is 'solid'.
+;
+;	NodePenWidth:		The thickness of the pen used for drawing the nodes.  The default value is 1.0.
+;
+;
+; All configuration parameters with the exception of "SubGraphs" are SQL expressions.  You can refer to a number
+; of columns, depending on the type of the element that configuration parameter affects.
+;
+; For Edges, the list of available parameters is:
+;
+;	EdgeNumCalls:		The total number of calls to this edge within the current graph.
+;	MaxEdgeNumCalls:	The total number of calls to the edge with the most calls within the current graph.
+;	AvgSelfTime:		The average amount of time per call spent in this edge within the current graph, excluding
+;						time spent in child edges.
+;	MaxAvgSelfTime:		The maximum AvgSelfTime of any edges within the current graph.
+;	TotalSelfTime:		The total amount of time spent in this edge within the current graph, excluding time spent
+;						in child edges.
+;	MaxTotalSelfTime:	The maximum TotalSelfTime of any edges within the current graph.
+;	AvgTotalTime:		The average amount of time per call spent in this edge within the current graph, including
+;						time spent in child edges.
+;	MaxAvgTotalTime:	The maximum AvgTotalTime of any edges within the current graph.
+;	TotalTotalTime:		The total amount of time spent in this edge within the current graph, including time spent
+;						in child edges.
+;	MaxTotalTotalTime:	The maximum TotalTotalTime of any edges within the current graph.
+;	NumPresent:			The number of call graphs this edge was part of.
+;	NumGraphs:			Total number of call graphs within the top level function this graph is part of.
+;
+; For Nodes, the list of available parameters is:
+;
+;	FunctionName:		The name of the function this node represents.
+;	NodeIsGraphEntryFunction:
+;						True if this function is the entry point to the current graph, false otherwise.
+;	NodeIsSubGraphEntryFunction:
+;						True if this function is the entry point to another subgraph, false otherwise.
+;
+;
+
+
+; performance graph example
+
+; Show the edges with most AvgSelfTime in red, others in grey/black
+EdgeColor = text '#' || CASE WHEN AvgSelfTime >= 0.7*MaxAvgSelfTime THEN lpad(to_hex(100 + (((AvgSelfTime-0.7*MaxAvgSelfTime) / ((1 - 0.7)*MaxAvgSelfTime))*125)::int), 2, '0')||'0000' ELSE repeat(lpad(to_hex(215 - (AvgSelfTime / (0.7*MaxAvgSelfTime) * 215)::int), 2, '0'), 3) END
+
+; Show the more expensive paths in bold
+EdgePenWidth = GREATEST((TotalTotalTime / MaxTotalTotalTime) * 5.0, 1.0)
+
+
+; All nodes which are subgraph entry functions should be boxes.
+NodeShape = CASE WHEN NodeIsSubGraphEntryFunction THEN 'box' ELSE 'ellipse' END
+
+; Make the box dashed when it is a subgraph "reference" within another graph, but keep it solid when
+; rendering the actual subgraph.
+NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END 
