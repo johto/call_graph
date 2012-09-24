@@ -272,7 +272,6 @@ SQL
 
 my $dbh = DBI->connect("dbi:Pg:dbname=$dbname", "", "", {RaiseError => 1, PrintError => 0});
 
-# We can assume the data is ordered by GraphID
 my $sth = $dbh->prepare($sqlquery);
 $sth->execute($params->{SubGraphs});
 
