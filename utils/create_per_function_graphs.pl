@@ -191,15 +191,14 @@ sub create_per_function_graphs
 	}
 }
 
-if (@ARGV != 1)
+if (@ARGV != 2)
 {
-	print "Usage: ./create_per_function_graphs.pl graphdir\n";
+	print "Usage: ./create_per_function_graphs.pl graphdir dbname\n";
 	die;
 }
 
 my $graphdir = $ARGV[0];
-
-my $dbname = "marko";
+my $dbname = $ARGV[1];
 
 my $edge_query = 
 <<"SQL";
