@@ -264,7 +264,7 @@ FROM
 		pg_proc pg_proc
 			ON (pg_proc.oid = Edges.Callee)
 	GROUP BY
-		GraphID, TopLevelFunction, Callee, proname, oid, NodeIsGraphEntryFunction
+		GraphID, TopLevelFunction, Callee, proname, pg_proc.oid, NodeIsGraphEntryFunction
 ) ss
 
 ORDER BY
