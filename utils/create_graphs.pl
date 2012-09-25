@@ -95,10 +95,10 @@ SubGraphParams (TopLevelFunction, Callee, SubGraphID) AS (
 			unnest(\$1::text[]) SubGraphInput (val)
 	) SubGraphs (TopLevelFunction, EntryFunction)
 	JOIN
-		fake_pgproc tlf
+		pg_proc tlf
 			ON (tlf.proname = SubGraphs.TopLevelFunction)
 	JOIN
-		fake_pgproc ef
+		pg_proc ef
 			ON (ef.proname = SubGraphs.EntryFunction)
 	GROUP BY tlf.proname, ef.proname
 ),
@@ -230,8 +230,8 @@ FROM
 	SELECT
 		GraphID,
 		GraphID||'e'||Callee AS NodeID,
-		fake_pgproc.proname AS FunctionName,
-		fake_pgproc.oid AS FunctionOid,
+		pg_proc.proname AS FunctionName,
+		pg_proc.oid AS FunctionOid,
 		(TopLevelFunction, Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams) AS NodeIsSubGraphEntryFunction,
 		NodeIsGraphEntryFunction
 	FROM
@@ -261,8 +261,8 @@ FROM
 			SubGraphParams
 	) Edges
 	JOIN
-		fake_pgproc fake_pgproc
-			ON (fake_pgproc.oid = Edges.Callee)
+		pg_proc pg_proc
+			ON (pg_proc.oid = Edges.Callee)
 	GROUP BY
 		GraphID, TopLevelFunction, Callee, proname, oid, NodeIsGraphEntryFunction
 ) ss
