@@ -318,8 +318,8 @@ while (1)
 		$graph = $row->{graphid};
 		if (defined $graphs->{$graph})
 		{
-			# Shouldn't happen unless someone changes this script or the function
-			die 'graph list not ordered by GraphID';
+			# Shouldn't happen unless someone changes this script
+			die "graph list not ordered by GraphID";
 		}
 
 		$graphs->{$graph} = { size => 0, name => "graph $graph" };
@@ -327,11 +327,12 @@ while (1)
 		# If $dot_debug is set, write .dot files.  if not, pipe the output to dot
 		if ($dot_debug)
 		{
-			open(DOT, ">", $graphdir."/".$graph.".dot");
+			$filename = "$graphdir/$graph.dot";
+			open(DOT, ">", $filename) or die "could not open file $filename";
 		}
 		else
 		{
-			open(DOT, "| dot -Tsvg -o ".$graphdir."/".$graph.".svg");
+			open(DOT, "| dot -Tsvg -o $graphdir/$graph.svg") or die "could not fork";
 		}
 
 		print DOT "digraph graph1 {\n";
