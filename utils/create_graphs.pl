@@ -68,6 +68,7 @@ my $params =
 
 	NodeLabel			=>		"FunctionName",
 	NodeShape			=>		"'ellipse'",
+	NodeHref			=>		"NULL",
 	NodeColor			=>		"'black'",
 	NodeStyle			=>		"'solid'",
 	NodePenWidth		=>		1.0
@@ -171,6 +172,7 @@ SELECT
 	NULL::text AS NodeID,
 	NULL::text AS NodeLabel,
 	NULL::text AS NodeShape,
+	NULL::text AS NodeHref,
 	$params->{EdgeColor} AS Color,
 	$params->{EdgeStyle} AS Style,
 	$params->{EdgePenWidth} AS PenWidth
@@ -219,6 +221,7 @@ SELECT
 	NodeID,
 	$params->{NodeLabel} AS NodeLabel,
 	$params->{NodeShape} AS NodeShape,
+	$params->{NodeHref} AS NodeHref,
 	$params->{NodeColor} AS Color,
 	$params->{NodeStyle} AS Style,
 	$params->{NodePenWidth} AS PenWidth
@@ -228,6 +231,7 @@ FROM
 		GraphID,
 		GraphID||'e'||Callee AS NodeID,
 		fake_pgproc.proname AS FunctionName,
+		fake_pgproc.oid AS FunctionOid,
 		(TopLevelFunction, Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams) AS NodeIsSubGraphEntryFunction,
 		NodeIsGraphEntryFunction
 	FROM
@@ -260,7 +264,7 @@ FROM
 		fake_pgproc fake_pgproc
 			ON (fake_pgproc.oid = Edges.Callee)
 	GROUP BY
-		GraphID, TopLevelFunction, Callee, proname, NodeIsGraphEntryFunction
+		GraphID, TopLevelFunction, Callee, proname, oid, NodeIsGraphEntryFunction
 ) ss
 
 ORDER BY
@@ -327,7 +331,7 @@ while (1)
 		# If $dot_debug is set, write .dot files.  if not, pipe the output to dot
 		if ($dot_debug)
 		{
-			$filename = "$graphdir/$graph.dot";
+			my $filename = "$graphdir/$graph.dot";
 			open(DOT, ">", $filename) or die "could not open file $filename";
 		}
 		else
@@ -347,7 +351,8 @@ while (1)
 	}
 	elsif ($row->{elementtype} eq 'node')
 	{
-		$data = "\"$row->{nodeid}\" [label=\"$row->{nodelabel}\", shape=$row->{nodeshape}, style=$row->{style}];";
+		my $optional_url = defined $row->{nodehref} ? "URL=\"$row->{nodehref}\"" : "";
+		$data = "\"$row->{nodeid}\" [label=\"$row->{nodelabel}\", shape=$row->{nodeshape}, style=$row->{style} $optional_url];";
 	}
 	else
 	{

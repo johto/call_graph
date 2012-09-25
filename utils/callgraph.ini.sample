@@ -78,3 +78,6 @@ NodeShape = CASE WHEN NodeIsSubGraphEntryFunction THEN 'box' ELSE 'ellipse' END
 ; Make the box dashed when it is a subgraph "reference" within another graph, but keep it solid when
 ; rendering the actual subgraph.
 NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END 
+
+; This is nice when using create_per_function_graphs.pl
+NodeHref = FunctionOid||'.svg'
