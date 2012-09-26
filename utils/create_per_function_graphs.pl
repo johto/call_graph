@@ -155,7 +155,7 @@ sub create_per_function_graphs
 		{
 			if (!exists $nodes{$callee})
 			{
-				die "function $callee not present in pg_proc" unless exists $functions->{$callee};
+				die "function $callee not present in oid lookup table" unless exists $functions->{$callee};
 			
 				$nodes{$callee} = { predecessors => {},
 									successors => {},
@@ -174,7 +174,7 @@ sub create_per_function_graphs
 
 		if (!exists $nodes{$caller})
 		{
-			die "function $caller not present in pg_proc" unless exists $functions->{$caller};
+			die "function $caller not present in oid lookup table" unless exists $functions->{$caller};
 
 			$nodes{$caller} = { predecessors => {},
 								successors => { $callee => 1 },
@@ -193,7 +193,7 @@ sub create_per_function_graphs
 
 		if (!exists $nodes{$callee})
 		{
-			die "function $callee not present in pg_proc" unless exists $functions->{$callee};
+			die "function $callee not present in oid lookup table" unless exists $functions->{$callee};
 
 			$nodes{$callee} = { predecessors => { $caller => 1 },
 								successors => {},
@@ -214,14 +214,15 @@ sub create_per_function_graphs
 	}
 }
 
-if (@ARGV != 2)
+if (@ARGV != 3)
 {
-	print "Usage: ./create_per_function_graphs.pl graphdir dbname\n";
+	print "Usage: ./create_per_function_graphs.pl graphdir dbname oid_lookup_table\n";
 	die;
 }
 
 my $graphdir = $ARGV[0];
 my $dbname = $ARGV[1];
+my $oid_lookup_table = $ARGV[2];
 
 my $edge_query = 
 <<"SQL";
@@ -237,7 +238,7 @@ my $oid_name_map_query =
 SELECT
 	oid, proname
 FROM
-	pg_proc
+	$oid_lookup_table
 SQL
 ;
 
@@ -264,7 +265,7 @@ $sth->execute();
 if ($sth->rows <= 0)
 {
 	# shouldn't happen
-	die "could not get a list of functions from pg_proc";
+	die "could not get a list of functions from $oid_lookup_table";
 }
 
 my %functions;
