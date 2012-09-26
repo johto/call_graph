@@ -6,6 +6,9 @@
 ;	SubGraphs:			A comma-separated list of subgraphs in the form TopLevelFunction.SubGraphEntryFunction.
 ;						Note that the function names are case sensitive.  The default value is an empty list.
 ;
+;	OidLookupTable		The name of the table which should be used to convert oids to function names.  The table
+;						should have at least columns "oid" and "proname".  The default value is "pg_proc".
+;
 ;
 ;	EdgeColor:			The color used for edges.  Refer to the graphviz manual for more information on accepted
 ;						values.  The default value is 'black'.
@@ -28,6 +31,9 @@
 ;						values.  The default value is 'solid'.
 ;
 ;	NodePenWidth:		The thickness of the pen used for drawing the nodes.  The default value is 1.0.
+;
+;	NodeHref:			The name of the node is made a link that points to this URL, if set.  The default value
+;						is NULL, which doesn't create a link.
 ;
 ;
 ; All configuration parameters with the exception of "SubGraphs" are SQL expressions.  You can refer to a number
@@ -79,5 +85,8 @@ NodeShape = CASE WHEN NodeIsSubGraphEntryFunction THEN 'box' ELSE 'ellipse' END
 ; rendering the actual subgraph.
 NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END 
 
-; This is nice when using create_per_function_graphs.pl
+; Add clickable links to function names.  Works well with create_per_function_graphs.pl
 NodeHref = FunctionOid||'.svg'
+
+; Look up function names from a table other than pg_proc
+OidLookupTable = fake_pgproc

@@ -62,6 +62,8 @@ my $htmlfile = $graphdir."/index.html";
 # default params
 my $params =
 {
+	OidLookupTable		=>		"\"pg_proc\"",
+
 	EdgeColor			=>		"'black'",
 	EdgeStyle			=>		"'solid'",
 	EdgePenWidth		=>		1.0,
@@ -95,10 +97,10 @@ SubGraphParams (TopLevelFunction, Callee, SubGraphID) AS (
 			unnest(\$1::text[]) SubGraphInput (val)
 	) SubGraphs (TopLevelFunction, EntryFunction)
 	JOIN
-		pg_proc tlf
+		$params->{OidLookupTable} tlf
 			ON (tlf.proname = SubGraphs.TopLevelFunction)
 	JOIN
-		pg_proc ef
+		$params->{OidLookupTable} ef
 			ON (ef.proname = SubGraphs.EntryFunction)
 	GROUP BY tlf.proname, ef.proname
 ),
@@ -230,8 +232,8 @@ FROM
 	SELECT
 		GraphID,
 		GraphID||'e'||Callee AS NodeID,
-		pg_proc.proname AS FunctionName,
-		pg_proc.oid AS FunctionOid,
+		proclookup.proname AS FunctionName,
+		proclookup.oid AS FunctionOid,
 		(TopLevelFunction, Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams) AS NodeIsSubGraphEntryFunction,
 		NodeIsGraphEntryFunction
 	FROM
@@ -261,10 +263,10 @@ FROM
 			SubGraphParams
 	) Edges
 	JOIN
-		pg_proc pg_proc
-			ON (pg_proc.oid = Edges.Callee)
+		$params->{OidLookupTable} proclookup
+			ON (proclookup.oid = Edges.Callee)
 	GROUP BY
-		GraphID, TopLevelFunction, Callee, proname, pg_proc.oid, NodeIsGraphEntryFunction
+		GraphID, TopLevelFunction, Callee, proclookup.proname, proclookup.oid, NodeIsGraphEntryFunction
 ) ss
 
 ORDER BY
