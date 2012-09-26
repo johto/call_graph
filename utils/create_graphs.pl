@@ -374,10 +374,10 @@ $dbh = undef;
 # Generate an HTML file
 
 open(HTML, '>', $htmlfile) or die("could not open $htmlfile");
-print HTML "<!DOCTYPE html>";
-print HTML "<html>";
-print HTML "<head><title>graphs</title></head>";
-print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">";
+print HTML "<!DOCTYPE html>\n";
+print HTML "<html>\n";
+print HTML "<head><title>graphs</title></head>\n";
+print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">\n";
 my $i = 0;
 
 # Order the graphs based on complexity; more complex graphs first
@@ -387,14 +387,14 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 
 	if ($i % 3 == 0)
 	{
-		print HTML "</tr>" if $i > 0;
-		print HTML "<tr>";
+		print HTML "</tr>\n" if $i > 0;
+		print HTML "<tr>\n";
 	}
 
-	print HTML "<td><a href=\"".$key.".svg\"><img width=\"300\" height=\"200\" src=\"".$key.".svg\" /></a></td>";
+	print HTML "<td><a href=\"".$key.".svg\"><img width=\"300\" height=\"200\" src=\"".$key.".svg\" /></a></td>\n";
 
 	++$i;
 }
-print HTML "</tr></table>";
-print HTML "</html>";
+print HTML "</tr></table>\n";
+print HTML "</html>\n";
 close(HTML);
