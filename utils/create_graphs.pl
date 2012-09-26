@@ -80,32 +80,55 @@ my %params =
 
 parse_config_file($config_file, \%params);
 
-my $sqlquery = 
+my $subgraph_params_query = 
 <<"SQL";
-WITH RECURSIVE
-SubGraphParams (TopLevelFunction, Callee, SubGraphID) AS (
-	-- XXX This is a bit ugly.  Maybe we should just take (oid,oid) pairs as parameters?
+CREATE TEMPORARY TABLE SubGraphParams
+	(TopLevelFunction, EntryFunction, SubGraphID)
+ON COMMIT DROP
+AS
+-- XXX This is a bit ugly.  Maybe we should just take (oid,oid) pairs as parameters?
 
+SELECT
+	-- There might be multiple functions with the same name, so simply pick the one
+	-- which has the smaller oid.
+	min(tlf.oid), min(ef.oid), row_number() OVER () AS SubGraphID
+FROM
+(
 	SELECT
-		-- There might be multiple functions with the same name, so simply pick the one
-		-- which has the smaller oid.
-		min(tlf.oid), min(ef.oid), row_number() OVER () AS SubGraphID
+		split_part(val, '.', 1),
+		split_part(val, '.', 2)
 	FROM
-	(
-		SELECT
-			split_part(val, '.', 1),
-			split_part(val, '.', 2)
-		FROM
-			unnest(\$1::text[]) SubGraphInput (val)
-	) SubGraphs (TopLevelFunction, EntryFunction)
-	JOIN
-		$params{OidLookupTable} tlf
-			ON (tlf.proname = SubGraphs.TopLevelFunction)
-	JOIN
-		$params{OidLookupTable} ef
-			ON (ef.proname = SubGraphs.EntryFunction)
-	GROUP BY tlf.proname, ef.proname
-),
+		unnest(\$1::text[]) SubGraphInput (val)
+) SubGraphs (TopLevelFunction, EntryFunction)
+JOIN
+	$params{OidLookupTable} tlf
+		ON (tlf.proname = SubGraphs.TopLevelFunction)
+JOIN
+	$params{OidLookupTable} ef
+		ON (ef.proname = SubGraphs.EntryFunction)
+GROUP BY tlf.proname, ef.proname
+;
+SQL
+;
+
+my $edges_query =
+<<"SQL";
+CREATE TEMPORARY TABLE Edges
+(
+	EdgeType,
+	GraphID,
+	TopLevelFunction,
+	EdgeID,
+	CallGraphID,
+	Caller,
+	Callee,
+	Calls,
+	TotalTime,
+	SelfTime
+)
+ON COMMIT DROP
+AS
+WITH RECURSIVE
 SubGraphEdgeWorkTable (EdgeID, CallGraphID, SubGraphID, Callee, SeenEdges, ShouldStop) AS (
 	-- Recursively make a list of edges that are part of any subgraphs.  We need to keep a list of
 	-- edges we've already visited to avoid looping infinitely in case there are loops in the call
@@ -116,23 +139,23 @@ SubGraphEdgeWorkTable (EdgeID, CallGraphID, SubGraphID, Callee, SeenEdges, Shoul
 
 	SELECT
 		EdgeID, Edges.CallGraphID, SubGraphParams.SubGraphID, Edges.Callee, ARRAY[EdgeID],
-		(CallGraphs.TopLevelFunction, Edges.Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams)
+		(CallGraphs.TopLevelFunction, Edges.Callee) IN (SELECT TopLevelFunction, EntryFunction FROM SubGraphParams)
 	FROM
 		call_graph.Edges
 	JOIN
 		call_graph.CallGraphs
 			ON (CallGraphs.CallGraphID = Edges.CallGraphID)
 	JOIN
-		SubGraphParams ON (SubGraphParams.TopLevelFunction = CallGraphs.TopLevelFunction AND SubGraphParams.Callee = Edges.Caller)
+		SubGraphParams ON (SubGraphParams.TopLevelFunction = CallGraphs.TopLevelFunction AND SubGraphParams.EntryFunction = Edges.Caller)
 	WHERE
-		(CallGraphs.TopLevelFunction, Edges.Caller) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams)
+		(CallGraphs.TopLevelFunction, Edges.Caller) IN (SELECT TopLevelFunction, EntryFunction FROM SubGraphParams)
 
 	UNION ALL
 
 	SELECT
 		Edges.EdgeID, Edges.CallGraphID, SubGraphEdgeWorkTable.SubGraphID, Edges.Callee, SeenEdges || Edges.EdgeID,
 		-- stop traversing this path if we hit an edge belonging to another subgraph
-		(CallGraphs.TopLevelFunction, Edges.Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams) OR
+		(CallGraphs.TopLevelFunction, Edges.Callee) IN (SELECT TopLevelFunction, EntryFunction FROM SubGraphParams) OR
 		-- make sure we don't loop forever if there are cycles
 		Edges.EdgeID = ANY(SeenEdges)
 	FROM
@@ -145,29 +168,32 @@ SubGraphEdgeWorkTable (EdgeID, CallGraphID, SubGraphID, Callee, SeenEdges, Shoul
 			ON (CallGraphs.CallGraphID = Edges.CallGraphID)
 	WHERE
 		NOT ShouldStop
-),
-Edges AS (
-	-- Create a processed list of edges, marking which subgraph they are part of (if any)
-	SELECT
-		CASE WHEN SubGraphEdges.EdgeID IS NULL THEN 'e' ELSE 's' END AS EdgeType,
-		COALESCE('s'||SubGraphEdges.SubGraphID, TopLevelFunction::text) AS GraphID,
-		TopLevelFunction,
-		Edges.EdgeID, Edges.CallGraphID, Caller, Callee, Edges.Calls, Edges.TotalTime, Edges.SelfTime
-	FROM
-		call_graph.Edges
-	JOIN
-		call_graph.CallGraphs USING (CallGraphID)
-	LEFT JOIN
-	(
-		SELECT
-			EdgeID, SubGraphID
-		FROM
-			SubGraphEdgeWorkTable
-		GROUP BY
-			EdgeID, SubGraphID
-	) SubGraphEdges
-		ON (SubGraphEdges.EdgeID = Edges.EdgeID)
 )
+-- Create a processed list of edges, marking which subgraph they are part of (if any)
+SELECT
+	CASE WHEN SubGraphEdges.EdgeID IS NULL THEN 'e' ELSE 's' END AS EdgeType,
+	COALESCE('s'||SubGraphEdges.SubGraphID, TopLevelFunction::text) AS GraphID,
+	TopLevelFunction,
+	Edges.EdgeID, Edges.CallGraphID, Caller, Callee, Edges.Calls, Edges.TotalTime, Edges.SelfTime
+FROM
+	call_graph.Edges
+JOIN
+	call_graph.CallGraphs USING (CallGraphID)
+LEFT JOIN
+(
+	SELECT
+		EdgeID, SubGraphID
+	FROM
+		SubGraphEdgeWorkTable
+	GROUP BY
+		EdgeID, SubGraphID
+) SubGraphEdges
+	ON (SubGraphEdges.EdgeID = Edges.EdgeID)
+SQL
+;
+
+my $edgedata_query = 
+<<"SQL";
 SELECT
 	GraphID,
 	'edge'::text AS ElementType,
@@ -236,7 +262,7 @@ FROM
 		GraphID||'e'||Callee AS NodeID,
 		proclookup.proname AS FunctionName,
 		proclookup.oid AS FunctionOid,
-		(TopLevelFunction, Callee) IN (SELECT TopLevelFunction, Callee FROM SubGraphParams) AS NodeIsSubGraphEntryFunction,
+		(TopLevelFunction, Callee) IN (SELECT TopLevelFunction, EntryFunction FROM SubGraphParams) AS NodeIsSubGraphEntryFunction,
 		NodeIsGraphEntryFunction
 	FROM
 	(
@@ -258,7 +284,7 @@ FROM
 		-- also need labels for the entry points into subgraphs
 		SELECT
 			's'||SubGraphID AS GraphID,
-			Callee,
+			EntryFunction,
 			TopLevelFunction,
 			TRUE AS NodeIsGraphEntryFunction
 		FROM
@@ -272,16 +298,69 @@ FROM
 ) ss
 
 ORDER BY
-	GraphID
+	GraphID, NodeID, EdgeFrom, EdgeTo
+SQL
+;
 
+my $statistics_query =
+<<"SQL";
+SELECT
+	GraphID, EntryFunctionName, to_char(FirstCall, 'YYYY-MM-DD HH24:MI:SS') AS FirstCall,
+	to_char(LastCall, 'YYYY-MM-DD HH24:MI:SS') AS LastCall, TotalCalls, TotalTime, AvgTime
+FROM
+(
+	SELECT
+		GraphID, EntryFunctionName, min(FirstCall) AS FirstCall, max(LastCall) AS LastCall,
+		sum(Calls) AS TotalCalls, round(sum(TotalTime)::numeric, 2) AS TotalTime,
+		round((sum(TotalTime) / sum(Calls))::numeric, 2) AS AvgTime
+	FROM
+	(
+	    SELECT
+			GraphID, Edges.Calls, Edges.TotalTime, proclookup.proname AS EntryFunctionName, FirstCall, LastCall
+		FROM
+			Edges
+		JOIN
+			$params{OidLookupTable} proclookup
+				ON (proclookup.oid = Edges.Callee)
+		JOIN
+			call_graph.CallGraphs cg
+				ON (cg.CallGraphID = Edges.CallGraphID)
+		WHERE
+			Caller = 0
+
+		UNION ALL
+
+		SELECT
+			's' || sgp.SubGraphID AS GraphID, Calls, TotalTime, proclookup.proname AS EntryFunctionName,
+			-- not available for subgraphs
+			NULL AS FirstCall, NULL AS LastCall
+		FROM
+			Edges e
+		JOIN
+			SubGraphParams sgp
+				ON (e.TopLevelFunction = sgp.TopLevelFunction and e.Callee = sgp.EntryFunction)
+		JOIN
+			$params{OidLookupTable} proclookup
+				ON (proclookup.oid = sgp.EntryFunction)
+	) EntryEdges
+	GROUP BY GraphID, EntryFunctionName
+) ss
 SQL
 ;
 
 
 my $dbh = DBI->connect("dbi:Pg:dbname=$dbname", "", "", {RaiseError => 1, PrintError => 0});
 
-my $sth = $dbh->prepare($sqlquery);
+$dbh->begin_work();
+
+my $sth = $dbh->prepare($subgraph_params_query);
 $sth->execute($params{SubGraphs});
+
+$sth = $dbh->prepare($edges_query);
+$sth->execute();
+
+$sth = $dbh->prepare($edgedata_query);
+$sth->execute();
 
 if ($sth->rows <= 0)
 {
@@ -330,7 +409,13 @@ while (1)
 			die "graph list not ordered by GraphID";
 		}
 
-		$graphs->{$graph} = { size => 0, name => "graph $graph" };
+		$graphs->{$graph} = { size => 0,
+							  name => "graph $graph",
+							  totalcalls => 0,
+							  totaltime => 0,
+							  avgtime => 0,
+							  firstcall => 'unknown',
+							  lastcall => 'unknown' };
 
 		# If $dot_debug is set, write .dot files.  if not, pipe the output to dot
 		if ($dot_debug)
@@ -360,13 +445,38 @@ while (1)
 	}
 	else
 	{
-		print "unknown element type $row->{elementtype}\n";
-		exit;
+		die "unknown element type $row->{elementtype}\n";
 	}
 
 	print DOT $data."\n";
 }
 
+$sth = $dbh->prepare($statistics_query);
+$sth->execute();
+
+while (1)
+{
+	my $row = $sth->fetchrow_hashref;
+
+	last if !defined $row;
+
+	$graph = $row->{'graphid'};
+
+	# We skip graphs that have nothing more than the top level function, so
+	# this is not an error condition.
+	next if (!defined $graphs->{$graph});
+
+	$graphs->{$graph}->{'totalcalls'} = $row->{'totalcalls'};
+	$graphs->{$graph}->{'totaltime'} = $row->{'totaltime'};
+	$graphs->{$graph}->{'avgtime'} = $row->{'avgtime'};
+	$graphs->{$graph}->{'entryfunctionname'} = $row->{'entryfunctionname'};
+
+	# use the default value set previously if the values are not known
+	$graphs->{$graph}->{'firstcall'} = $row->{'firstcall'} if defined $row->{'firstcall'};
+	$graphs->{$graph}->{'lastcall'} = $row->{'lastcall'} if defined $row->{'lastcall'};
+}
+
+$dbh->commit();
 $dbh->disconnect();
 $dbh = undef;
 
@@ -378,6 +488,7 @@ print HTML "<!DOCTYPE html>\n";
 print HTML "<html>\n";
 print HTML "<head><title>graphs</title></head>\n";
 print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">\n";
+
 my $i = 0;
 
 # Order the graphs based on complexity; more complex graphs first
@@ -385,13 +496,13 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 {
 	my $value = $graphs->{$key};
 
-	if ($i % 3 == 0)
-	{
-		print HTML "</tr>\n" if $i > 0;
-		print HTML "<tr>\n";
-	}
+	next if $value->{'totalcalls'} == 0;
 
-	print HTML "<td><a href=\"".$key.".svg\"><img width=\"300\" height=\"200\" src=\"".$key.".svg\" /></a></td>\n";
+	print HTML "<tr>\n";
+	print HTML "<td rowspan=2><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
+	print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
+	print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
+	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
 
 	++$i;
 }
