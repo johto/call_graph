@@ -120,7 +120,8 @@ sub draw_graph
 	foreach my $node (keys %visited_nodes)
 	{
 		my $proname = $nodes{$node}{'proname'};
-		print $pipe "\"$node\" [label=\"$proname\" URL=\"$node.svg\"];\n";
+		my $penwidth = $nodes{$node}{'istoplevelfunction'} ? 2.5 : 1.0;
+		print $pipe "\"$node\" [label=\"$proname\" URL=\"$node.svg\" penwidth=\"$penwidth\"];\n";
 	}
 
 	print $pipe "\"$center_node\" [label=\"$nodes{$center_node}{'proname'}\", style=dashed];\n";
@@ -148,8 +149,28 @@ sub create_per_function_graphs
 		my $callee = $edge->{callee};
 		my $callgraph = $edge->{callgraphid};
 
-		# skip the top level function edge
-		next if $caller == 0;
+		# If this is the first edge of the call graph, just make sure we know that
+		# the function is a top level function and then skip to the next edge.
+		if ($caller == 0)
+		{
+			if (!exists $nodes{$callee})
+			{
+				die "function $callee not present in pg_proc" unless exists $functions->{$callee};
+			
+				$nodes{$callee} = { predecessors => {},
+									successors => {},
+									callgraphs => { $callgraph => 1},
+									istoplevelfunction => 1,
+									proname => $functions->{$callee} };
+			}
+			else
+			{
+				$nodes{$callee}{'callgraphs'}{$callgraph} = 1;
+				$nodes{$callee}{'istoplevelfunction'} = 1;
+			}
+
+			next;
+		}
 
 		if (!exists $nodes{$caller})
 		{
@@ -158,7 +179,8 @@ sub create_per_function_graphs
 			$nodes{$caller} = { predecessors => {},
 								successors => { $callee => 1 },
 								callgraphs => { $callgraph => 1 },
-								proname => $functions->{$caller} };
+								proname => $functions->{$caller},
+								istoplevelfunction => 0 };
 		}
 		else
 		{
@@ -176,7 +198,8 @@ sub create_per_function_graphs
 			$nodes{$callee} = { predecessors => { $caller => 1 },
 								successors => {},
 								callgraphs => { $callgraph => 1},
-								proname => $functions->{$callee} };
+								proname => $functions->{$callee},
+								istoplevelfunction => 0 };
 		}
 		else
 		{
