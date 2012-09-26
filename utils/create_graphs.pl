@@ -27,6 +27,8 @@ sub parse_config_file
 
 		next if (!defined $4);
 		
+		# remember to check for SubGraphs separately
+		die("Unrecognized configuration parameter \"$4\"\n") if ($4 ne 'SubGraphs' && !exists $params->{$4});
 		$params->{$4} = $5;
 	}
 
@@ -43,8 +45,6 @@ sub parse_config_file
 	{
 		$params->{SubGraphs} = [];
 	}
-
-	return $params;
 }
 
 
@@ -60,8 +60,10 @@ my $dbname = $ARGV[2];
 my $htmlfile = $graphdir."/index.html";
 
 # default params
-my $params =
-{
+my %params =
+(
+	# parse_config_file() assumes that SubGraphs isn't defined
+
 	OidLookupTable		=>		"\"pg_proc\"",
 
 	EdgeColor			=>		"'black'",
@@ -74,9 +76,9 @@ my $params =
 	NodeColor			=>		"'black'",
 	NodeStyle			=>		"'solid'",
 	NodePenWidth		=>		1.0
-};
+);
 
-$params = parse_config_file($config_file, $params);
+parse_config_file($config_file, \%params);
 
 my $sqlquery = 
 <<"SQL";
@@ -97,10 +99,10 @@ SubGraphParams (TopLevelFunction, Callee, SubGraphID) AS (
 			unnest(\$1::text[]) SubGraphInput (val)
 	) SubGraphs (TopLevelFunction, EntryFunction)
 	JOIN
-		$params->{OidLookupTable} tlf
+		$params{OidLookupTable} tlf
 			ON (tlf.proname = SubGraphs.TopLevelFunction)
 	JOIN
-		$params->{OidLookupTable} ef
+		$params{OidLookupTable} ef
 			ON (ef.proname = SubGraphs.EntryFunction)
 	GROUP BY tlf.proname, ef.proname
 ),
@@ -175,9 +177,9 @@ SELECT
 	NULL::text AS NodeLabel,
 	NULL::text AS NodeShape,
 	NULL::text AS NodeHref,
-	$params->{EdgeColor} AS Color,
-	$params->{EdgeStyle} AS Style,
-	$params->{EdgePenWidth} AS PenWidth
+	$params{EdgeColor} AS Color,
+	$params{EdgeStyle} AS Style,
+	$params{EdgePenWidth} AS PenWidth
 FROM
 (
 	SELECT
@@ -221,12 +223,12 @@ SELECT
 	NULL AS EdgeFrom,
 	NULL AS EdgeTo,
 	NodeID,
-	$params->{NodeLabel} AS NodeLabel,
-	$params->{NodeShape} AS NodeShape,
-	$params->{NodeHref} AS NodeHref,
-	$params->{NodeColor} AS Color,
-	$params->{NodeStyle} AS Style,
-	$params->{NodePenWidth} AS PenWidth
+	$params{NodeLabel} AS NodeLabel,
+	$params{NodeShape} AS NodeShape,
+	$params{NodeHref} AS NodeHref,
+	$params{NodeColor} AS Color,
+	$params{NodeStyle} AS Style,
+	$params{NodePenWidth} AS PenWidth
 FROM
 (
 	SELECT
@@ -263,7 +265,7 @@ FROM
 			SubGraphParams
 	) Edges
 	JOIN
-		$params->{OidLookupTable} proclookup
+		$params{OidLookupTable} proclookup
 			ON (proclookup.oid = Edges.Callee)
 	GROUP BY
 		GraphID, TopLevelFunction, Callee, proclookup.proname, proclookup.oid, NodeIsGraphEntryFunction
@@ -279,7 +281,7 @@ SQL
 my $dbh = DBI->connect("dbi:Pg:dbname=$dbname", "", "", {RaiseError => 1, PrintError => 0});
 
 my $sth = $dbh->prepare($sqlquery);
-$sth->execute($params->{SubGraphs});
+$sth->execute($params{SubGraphs});
 
 if ($sth->rows <= 0)
 {
