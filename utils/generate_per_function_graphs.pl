@@ -132,16 +132,62 @@ sub draw_graph
 	die("dot failed for graph $center_node") if $? != 0;
 }
 
-sub create_per_function_graphs
+sub generate_per_function_graphs
 {
 	my $edge;
 
 	my $node;
 	my %nodes;
 	
-	my ($graphdir, $edges_ref, $functions) = @_;
+	my ($graphdir, $dbh, $oid_lookup_table) = @_;
 
-	my @edges = @$edges_ref;
+	my $edge_query = 
+<<"SQL";
+	SELECT
+		Caller, Callee, CallGraphID
+	FROM
+		call_graph.Edges
+SQL
+	;
+
+	my $oid_name_map_query =
+<<"SQL";
+	SELECT
+		oid, proname
+	FROM
+		$oid_lookup_table
+SQL
+	;
+
+	my $sth = $dbh->prepare($edge_query);
+	$sth->execute();
+
+	if ($sth->rows <= 0)
+	{
+		# shouldn't happen
+		die "no edges found in call_graph.Edges";
+	}
+
+	my @edges;
+	while (my $row = $sth->fetchrow_hashref)
+	{
+		push @edges, $row;
+	}
+
+	$sth = $dbh->prepare($oid_name_map_query);
+	$sth->execute();
+
+	if ($sth->rows <= 0)
+	{
+		# shouldn't happen
+		die "could not get a list of functions from $oid_lookup_table";
+	}
+
+	my %functions;
+	while (my $row = $sth->fetchrow_hashref)
+	{
+		$functions{$row->{oid}} = $row->{proname};
+	}
 
 	foreach $edge (@edges)
 	{
@@ -155,13 +201,13 @@ sub create_per_function_graphs
 		{
 			if (!exists $nodes{$callee})
 			{
-				die "function $callee not present in oid lookup table" unless exists $functions->{$callee};
+				die "function $callee not present in oid lookup table" unless exists $functions{$callee};
 			
 				$nodes{$callee} = { predecessors => {},
 									successors => {},
 									callgraphs => { $callgraph => 1},
 									istoplevelfunction => 1,
-									proname => $functions->{$callee} };
+									proname => $functions{$callee} };
 			}
 			else
 			{
@@ -174,12 +220,12 @@ sub create_per_function_graphs
 
 		if (!exists $nodes{$caller})
 		{
-			die "function $caller not present in oid lookup table" unless exists $functions->{$caller};
+			die "function $caller not present in oid lookup table" unless exists $functions{$caller};
 
 			$nodes{$caller} = { predecessors => {},
 								successors => { $callee => 1 },
 								callgraphs => { $callgraph => 1 },
-								proname => $functions->{$caller},
+								proname => $functions{$caller},
 								istoplevelfunction => 0 };
 		}
 		else
@@ -193,12 +239,12 @@ sub create_per_function_graphs
 
 		if (!exists $nodes{$callee})
 		{
-			die "function $callee not present in oid lookup table" unless exists $functions->{$callee};
+			die "function $callee not present in oid lookup table" unless exists $functions{$callee};
 
 			$nodes{$callee} = { predecessors => { $caller => 1 },
 								successors => {},
 								callgraphs => { $callgraph => 1},
-								proname => $functions->{$callee},
+								proname => $functions{$callee},
 								istoplevelfunction => 0 };
 		}
 		else
@@ -213,68 +259,4 @@ sub create_per_function_graphs
 		draw_graph($graphdir, $node, \%nodes);
 	}
 }
-
-if (@ARGV != 3)
-{
-	print "Usage: ./create_per_function_graphs.pl graphdir dbname oid_lookup_table\n";
-	die;
-}
-
-my $graphdir = $ARGV[0];
-my $dbname = $ARGV[1];
-my $oid_lookup_table = $ARGV[2];
-
-my $edge_query = 
-<<"SQL";
-SELECT
-	Caller, Callee, CallGraphID
-FROM
-	call_graph.Edges
-SQL
-;
-
-my $oid_name_map_query =
-<<"SQL";
-SELECT
-	oid, proname
-FROM
-	$oid_lookup_table
-SQL
-;
-
-my $dbh = DBI->connect("dbi:Pg:dbname=$dbname", "", "", {RaiseError => 1, PrintError => 0});
-
-my $sth = $dbh->prepare($edge_query);
-$sth->execute();
-
-if ($sth->rows <= 0)
-{
-	# shouldn't happen
-	die "no edges found in call_graph.Edges";
-}
-
-my @edges;
-while (my $row = $sth->fetchrow_hashref)
-{
-	push @edges, $row;
-}
-
-$sth = $dbh->prepare($oid_name_map_query);
-$sth->execute();
-
-if ($sth->rows <= 0)
-{
-	# shouldn't happen
-	die "could not get a list of functions from $oid_lookup_table";
-}
-
-my %functions;
-while (my $row = $sth->fetchrow_hashref)
-{
-	$functions{$row->{oid}} = $row->{proname};
-}
-
-$dbh->disconnect();
-$dbh = undef;
-
-create_per_function_graphs($graphdir, \@edges, \%functions);
+1;

@@ -5,10 +5,19 @@ use warnings;
 use DBI;
 use DBD::Pg;
 
+require "generate_per_function_graphs.pl";
+
 # Debug the dot file format (writes .dot files in the graphs/ directory instead
 # of rendering graphs).
 my $dot_debug = 0;
 
+# small function for trimming configuration parameter input
+sub trim
+{
+	my $var = shift @_;
+	$var =~ s/^\s+|\s+$//g;
+	return $var;
+}
 
 # XXX At some point it might make sense to use a real parser (Config::IniFiles
 # for example), but right now this works just as well and avoids introducing
@@ -32,13 +41,33 @@ sub parse_config_file
 		$params->{$4} = $5;
 	}
 
+
+	# XXX Here we have to special case some configuration parameters that have a
+	# special data type.  It's not yet too ugly, but slowly going that way..
+
+	if (defined $params->{GeneratePerFunctionGraphs})
+	{
+		my $value = trim($params->{GeneratePerFunctionGraphs});
+
+		if ($value eq 'yes' || $value eq '1' || $value eq 'true')
+			{ $params->{GeneratePerFunctionGraphs} = 1; }
+		elsif ($value eq 'no' || $value eq '0' || $value eq 'false')
+			{ $params->{GeneratePerFunctionGraphs} = 0; } 
+		else
+			{ die "Unrecognized input \"$value\" for GeneratePerFunctionGraphs"; }
+	}
+	else
+	{
+		$params->{GeneratePerFunctionGraphs} = 1;
+	}
+
 	# The user can specify a list of functions which are then separated from the
 	# actual graph they would otherwise be in, creating separate subgraphs.
 	if (defined $params->{SubGraphs})
 	{
 		my @subgraph_list = split(",", $params->{SubGraphs});
 		# trim() the elements
-		my @trimmed = map { local $_ = $_; s/^\s+|\s+$//g; $_ } @subgraph_list;
+		my @trimmed = map { trim($_) } @subgraph_list;
 		$params->{SubGraphs} = \@trimmed;
 	}
 	else
@@ -73,20 +102,23 @@ my $htmlfile = $graphdir."/index.html";
 # default params
 my %params =
 (
-	# parse_config_file() assumes that SubGraphs isn't defined
+	# set the params with special data types to "undef" and let parse_config_file()
+	# deal with them
+	SubGraphs					=>		undef,
+	GeneratePerFunctionGraphs	=>		undef,
 
-	OidLookupTable		=>		"\"pg_proc\"",
+	OidLookupTable				=>		"\"pg_proc\"",
 
-	EdgeColor			=>		"'black'",
-	EdgeStyle			=>		"'solid'",
-	EdgePenWidth		=>		1.0,
+	EdgeColor					=>		"'black'",
+	EdgeStyle					=>		"'solid'",
+	EdgePenWidth				=>		1.0,
 
-	NodeLabel			=>		"FunctionName",
-	NodeShape			=>		"'ellipse'",
-	NodeHref			=>		"NULL",
-	NodeColor			=>		"'black'",
-	NodeStyle			=>		"'solid'",
-	NodePenWidth		=>		1.0
+	NodeLabel					=>		"FunctionName",
+	NodeShape					=>		"'ellipse'",
+	NodeHref					=>		"NULL",
+	NodeColor					=>		"'black'",
+	NodeStyle					=>		"'solid'",
+	NodePenWidth				=>		1.0
 );
 
 parse_config_file($config_file, \%params);
@@ -360,9 +392,17 @@ SQL
 ;
 
 
+
+
 my $dbh = DBI->connect("dbi:Pg:dbname=$dbname", "", "", {RaiseError => 1, PrintError => 0});
 
 $dbh->begin_work();
+
+if ($params{GeneratePerFunctionGraphs})
+{
+	# defined in generate_per_function_graphs.pl
+	generate_per_function_graphs($graphdir, $dbh, $params{OidLookupTable});
+}
 
 my $sth = $dbh->prepare($subgraph_params_query);
 $sth->execute($params{SubGraphs});
@@ -389,6 +429,7 @@ my $graph = undef;
 #
 
 my $graphs = {};
+my $pipe;
 while (1)
 {
 	my $row = $sth->fetchrow_hashref;
@@ -398,11 +439,11 @@ while (1)
 	if (!defined($row) ||
 		(defined $graph && $graph ne $row->{graphid}))
 	{
-		print DOT "}\n";
-		close(DOT);
+		print $pipe "}\n";
+		close($pipe);
 
 		# Check the exit code of the program
-		die('dot failed') if $? != 0;
+		die "dot failed" if $? != 0;
 
 		$graph = undef;
 
@@ -432,14 +473,14 @@ while (1)
 		if ($dot_debug)
 		{
 			my $filename = "$graphdir/$graph.dot";
-			open(DOT, ">", $filename) or die "could not open file $filename";
+			open($pipe, ">", $filename) or die "could not open file $filename";
 		}
 		else
 		{
-			open(DOT, "| dot -Tsvg -o $graphdir/$graph.svg") or die "could not fork";
+			open($pipe, "| dot -Tsvg -o $graphdir/$graph.svg") or die "could not fork";
 		}
 
-		print DOT "digraph graph1 {\n";
+		print $pipe "digraph graph1 {\n";
 	}
 
 	$graphs->{$graph}->{size}++;
@@ -459,18 +500,14 @@ while (1)
 		die "unknown element type $row->{elementtype}\n";
 	}
 
-	print DOT $data."\n";
+	print $pipe $data."\n";
 }
 
 $sth = $dbh->prepare($statistics_query);
 $sth->execute();
 
-while (1)
+while (my $row = $sth->fetchrow_hashref)
 {
-	my $row = $sth->fetchrow_hashref;
-
-	last if !defined $row;
-
 	$graph = $row->{'graphid'};
 
 	# We skip graphs that have nothing more than the top level function, so
