@@ -124,7 +124,11 @@ static void process_edge_data()
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
 
-	planptr = SPI_prepare("INSERT INTO call_graph.CallGraphBuffer(CallGraphBufferID, TopLevelFunction, Caller, Callee, Calls, TotalTime, SelfTime) VALUES ($1, $2, $3, $4, $5, $6, $7)", 7, argtypes);
+	planptr = SPI_prepare("INSERT INTO 																				"
+						  "   call_graph.CallGraphBuffer (CallGraphBufferID, TopLevelFunction, Caller, Callee,		"
+						  "								  Calls, TotalTime, SelfTime)								"
+						  "   VALUES ($1, $2, $3, $4, $5, $6, $7)													",
+						  7, argtypes);
 	if (!planptr)
 		elog(ERROR, "could not prepare an SPI plan for call graph buffer");
 
