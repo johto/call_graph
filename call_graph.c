@@ -54,6 +54,7 @@ typedef struct hashelem {
 
 
 static bool enable_call_graph = false;
+static bool track_table_usage = false;
 
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
@@ -146,6 +147,36 @@ static void process_edge_data()
 
 		if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
 			elog(ERROR, "SPI_execp() failed: %d", ret);
+	}
+
+	if (track_table_usage)
+	{
+		TimestampTz xact_start, stmt_start;
+
+		xact_start = GetCurrentTransactionStartTimestamp();
+		stmt_start = GetCurrentStatementStartTimestamp();
+
+		/* Only track usage if this was the first query in the transaction */
+		if (timestamp_cmp_internal(xact_start, stmt_start) == 0)
+		{
+			argtypes[0] = INT8OID;
+			argtypes[1] = InvalidOid;
+
+			/* args[0] was set to the correct value above */
+
+			planptr = SPI_prepare("INSERT INTO															"
+								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid)			"
+								  "SELECT																"
+								  "   $1, relid															"
+								  "FROM																	"
+								  "   pg_stat_xact_user_tables											"
+								  "WHERE																"
+								  "   seq_scan > 0 OR idx_scan > 0										",
+								  1, argtypes);
+
+			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
+				elog(ERROR, "SPI_execp() failed: %d", ret);
+		}
 	}
 
 	SPI_finish();
@@ -312,7 +343,9 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 void
 _PG_init(void)
 {
-	DefineCustomBoolVariable("call_graph.enable", "enable real-time tracking of function calls", "", &enable_call_graph, false, PGC_USERSET,
+	DefineCustomBoolVariable("call_graph.enable", "Enables real-time tracking of function calls.", "", &enable_call_graph, false, PGC_USERSET,
+							 0, NULL, NULL, NULL);
+	DefineCustomBoolVariable("call_graph.track_table_usage", "Enables tracking of per-callgraph table usage.", "Has no effect if call_graph.enable is not set.", &track_table_usage, false, PGC_USERSET,
 							 0, NULL, NULL, NULL);
 
 	/* Install our hooks */

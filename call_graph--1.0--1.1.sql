@@ -1,55 +1,24 @@
-/* call_graph/call_graph--1.0.sql */
+/* call_graph/call_graph--1.0--1.1.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION call_graph" to load this file. \quit
+\echo Use "ALTER EXTENSION UPDATE" to load this file. \quit
 
-GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
-
-CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.0'; $$ LANGUAGE sql;
-
-CREATE SEQUENCE seqCallGraphBuffer;
-CREATE UNLOGGED TABLE CallGraphBuffer(
+CREATE UNLOGGED TABLE TableAccessBuffer(
 CallGraphBufferID bigint NOT NULL,
-TopLevelFunction oid NOT NULL CHECK (TopLevelFunction <> '0'),
-Caller oid NOT NULL,
-Callee oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-Datestamp timestamptz NOT NULL default now()
+relid oid NOT NULL
 );
+
+CREATE INDEX TableAccessBuffer_CallGraphBufferID_Index ON TableAccessBuffer(CallGraphBufferID);
 
 -- make sure all users are allowed to track data
-GRANT USAGE ON SEQUENCE seqCallGraphBuffer TO PUBLIC;
-GRANT INSERT ON TABLE CallGraphBuffer TO PUBLIC;
+GRANT INSERT ON TABLE TableAccessBuffer TO PUBLIC;
 
-CREATE INDEX CallGraphBuffer_CallGraphBufferID_Index ON CallGraphBuffer(CallGraphBufferID);
-
-CREATE TABLE CallGraphs(
-CallGraphID bigserial NOT NULL,
-TopLevelFunction oid NOT NULL,
-EdgesHash text NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-FirstCall timestamptz NOT NULL,
-LastCall timestamptz NOT NULL,
-PRIMARY KEY (CallGraphID),
-UNIQUE (TopLevelFunction, EdgesHash)
+CREATE TABLE TableUsage(
+CallGraphID bigint NOT NULL,
+relid oid NOT NULL
 );
 
-CREATE TABLE Edges(
-EdgeID bigserial NOT NULL,
-CallGraphID int NOT NULL REFERENCES CallGraphs(CallGraphID),
-Caller Oid NOT NULL,
-Callee Oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-PRIMARY KEY (EdgeID),
-UNIQUE (CallGraphID, Caller, Callee)
-);
-
+-- replace ProcessCallGraphBuffers()
 CREATE OR REPLACE FUNCTION ProcessCallGraphBuffers()
  RETURNS integer
  LANGUAGE plpgsql
@@ -124,7 +93,7 @@ LOOP
     -- we need to add the edges.
     --
     -- Note that although we're doing multiple CallGraphBufferIDs at a time, we're only working on a single
-    -- call graph, so we can safely aggregate the data to avoid doing multiple UPDATEs.
+    -- call graph, so we can safely aggregate the data in CallGraphBufferSum to avoid doing multiple UPDATEs.
 
     IF _GraphExists THEN
         UPDATE Edges SET
@@ -154,6 +123,21 @@ LOOP
     END IF;
 
     DELETE FROM CallGraphBuffer WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs);
+
+	-- We can process the table usage buffers in one go since we don't need to UPDATE any
+	-- previously existing values.
+	WITH Buffers AS (
+		DELETE FROM TableAccessBuffer
+		WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs)
+		RETURNING CallGraphBufferID, relid
+	)
+	INSERT INTO TableUsage (CallGraphID, relid)
+	SELECT _CallGraphID, relid
+	FROM Buffers tub
+	WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs)
+	AND NOT EXISTS
+		(SELECT * FROM TableUsage tu
+		 WHERE tu.CallGraphID = _CallGraphID AND tu.relid = tub.relid);
     _NumGraphs := _NumGraphs + 1;
 END LOOP;
 
