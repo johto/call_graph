@@ -189,6 +189,7 @@ SQL
 		$functions{$row->{oid}} = $row->{proname};
 	}
 
+	# First populate %nodes with information about all the nodes.
 	foreach $edge (@edges)
 	{
 		my $caller = $edge->{caller};
@@ -254,6 +255,7 @@ SQL
 		}
 	}
 
+	# .. and finally, draw all of the graphs
 	foreach my $node (keys %nodes)
 	{
 		draw_graph($graphdir, $node, \%nodes);
