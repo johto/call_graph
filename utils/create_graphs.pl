@@ -48,6 +48,17 @@ sub parse_config_file
 }
 
 
+#
+# MAIN PROGRAM STARTS HERE
+#
+
+
+# check that GraphViz is installed
+`which dot`;
+die "Could not execute shell command: $!\n" if $? == -1;
+die "\"dot\" not found in your PATH.  This tool requires an existing installation of GraphViz.\n" if $? != 0;
+
+
 if (@ARGV != 3)
 {
 	print "Usage: ./create_graphs.pl graphdir configfile dbname\n";
