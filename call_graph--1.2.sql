@@ -1,11 +1,11 @@
-/* call_graph/call_graph--1.1.sql */
+/* call_graph/call_graph--1.2.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION call_graph" to load this file. \quit
 
 GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
 
-CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.1'; $$ LANGUAGE sql;
+CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.2'; $$ LANGUAGE sql;
 
 CREATE SEQUENCE seqCallGraphBuffer;
 CREATE UNLOGGED TABLE CallGraphBuffer(
@@ -29,7 +29,7 @@ GRANT USAGE ON SEQUENCE seqCallGraphBuffer TO PUBLIC;
 GRANT INSERT ON TABLE CallGraphBuffer TO PUBLIC;
 GRANT INSERT ON TABLE TableAccessBuffer TO PUBLIC;
 
-CREATE INDEX CallGraphBuffer_CallGraphBufferID_Index ON CallGraphBuffer(CallGraphBufferID);
+CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
 CREATE INDEX TableAccessBuffer_CallGraphBufferID_Index ON TableAccessBuffer(CallGraphBufferID);
 
 CREATE TABLE CallGraphs(
@@ -62,13 +62,16 @@ CallGraphID bigint NOT NULL,
 relid oid NOT NULL
 );
 
+CREATE INDEX TableUsage_CallGraphID_Index ON TableUsage(CallGraphID);
 
-CREATE OR REPLACE FUNCTION ProcessCallGraphBuffers()
- RETURNS integer
+-- replace ProcessCallGraphBuffers()
+CREATE OR REPLACE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
+ RETURNS SETOF bigint
  LANGUAGE plpgsql
  SET search_path TO @extschema@
 AS $function$
 DECLARE
+_MinBufferID bigint;
 _CallGraphID bigint;
 _GraphExists bool;
 _NumGraphs int;
@@ -90,7 +93,9 @@ _NumGraphs := 0;
 -- CallGraphBufferID.
 --
 -- After the subquery is done, we aggregate the data again, this time for each (TopLevelFunction, EdgesHash) pair.  This
--- way we can do the processing a callgraph at a time, rather than a CallGraphBufferID at a time.
+-- way we can do the processing one callgraph at a time, rather than a CallGraphBufferID at a time.
+
+_MinBufferID = (SELECT min(CallGraphBufferID) FROM call_graph.CallGraphBuffer);
 
 FOR _ IN
 SELECT
@@ -106,14 +111,22 @@ FROM (
     SELECT
         CallGraphBufferID,
         TopLevelFunction,
-        md5(array_send(array_agg(row(caller, callee) ORDER BY caller, callee))) AS EdgesHash,
+        md5(array_send(array_agg(ROW(Caller, Callee) ORDER BY Caller, Callee))) AS EdgesHash,
         MAX(CASE WHEN Caller = 0 THEN Calls     END) AS Calls,
         MAX(CASE WHEN Caller = 0 THEN TotalTime END) AS TotalTime,
         MAX(CASE WHEN Caller = 0 THEN SelfTime  END) AS SelfTime,
         MAX(Datestamp) AS CallStamp
-    FROM CallGraphBuffer
+    FROM
+	(
+		SELECT
+			CallGraphBufferID, TopLevelFunction, Caller, Callee, Calls, TotalTime, SelfTime, DateStamp
+		FROM
+			CallGraphBuffer
+		WHERE
+			CallGraphBufferID >= _MinBufferID AND CallGraphBufferID <= _MinBufferID + _MaxBufferCount
+	) AS Buffers
     GROUP BY CallGraphBufferID, TopLevelFunction
-) AS CallGraphBufferGrouped
+) AS GroupedBuffers
 GROUP BY TopLevelFunction, EdgesHash
 LOOP
     UPDATE CallGraphs SET
@@ -168,7 +181,7 @@ LOOP
 
     DELETE FROM CallGraphBuffer WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs);
 
-	-- We can process the table usage buffers in one go since we don't need to UPDATE any
+	-- We can process the table usage buffers in one go since we don't (currently) need to UPDATE any
 	-- previously existing values.
 	WITH Buffers AS (
 		DELETE FROM TableAccessBuffer
@@ -178,14 +191,15 @@ LOOP
 	INSERT INTO TableUsage (CallGraphID, relid)
 	SELECT _CallGraphID, relid
 	FROM Buffers tub
-	WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs)
-	AND NOT EXISTS
+	WHERE
+		NOT EXISTS
 		(SELECT * FROM TableUsage tu
 		 WHERE tu.CallGraphID = _CallGraphID AND tu.relid = tub.relid);
-    _NumGraphs := _NumGraphs + 1;
+
+	RETURN NEXT _CallGraphID;
 END LOOP;
 
-RETURN _NumGraphs;
+RETURN;
 
 END;
 $function$
