@@ -5,7 +5,7 @@
 
 CREATE OR REPLACE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.2'; $$ LANGUAGE sql;
 
-DROP INDEX CallGraphBuffer_CallGraphBufferID_Index ON CallGraphBuffer(CallGraphBufferID);
+DROP INDEX CallGraphBuffer_CallGraphBufferID_Index;
 CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
 
 -- Replace ProcessCallGraphBuffers().  The function signature changed enough from 1.1 to
