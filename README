@@ -1,20 +1,24 @@
-Call_Graph is a module which automatically tracks function calls inside the database.  That
-information can then be used to create call graphs.
+Call_Graph is a module for PostgreSQL 9.1 which automatically tracks function
+calls inside the database.  That information can then be used to create call
+graphs.
 
-The module needs to be loaded when the PostgreSQL server starts so you should add 'call_graph' to
-your  shared_preload_libraries  in your postgresql.conf.  You should also add 'call_graph' to your
-custom_variable_classes.  The extension installs itself into the "call_graph" schema, creating it
-in case it doesn't exist.
+The module needs to be loaded when the PostgreSQL server starts so you should
+add 'call_graph' to your  shared_preload_libraries  in your postgresql.conf.
+You should also add 'call_graph' to your custom_variable_classes.  The
+extension installs itself into the "call_graph" schema, creating it in case it
+doesn't exist.
 
-By default, the module does not track any function calls.  To enable tracking, you need to enable
-the call_graph.enable GUC.  You can do that on a per-session (or even per-transaction) basis,
-or you can set it in postgresql.conf.  See the official PostgreSQL documentation for more
-information.
+By default, the module does not track any function calls.  To enable tracking,
+you need to enable the call_graph.enable GUC.  You can do that on a per-session
+(or even per-transaction) basis, or you can set it in postgresql.conf.  See the
+official PostgreSQL documentation for more information.
 
-To avoid lock contention the backends only append data into an unlogged table.  That table can then
-be periodically processed (using the ProcessCallGraphBuffers function) to create the call graph
-information.  In this session, you will probably also want to set the configuration parameter
-"call_graph.enable" to false to avoid generating data for the ProcessCallGraphBuffers function.
+To avoid lock contention the backends only append data into an unlogged table.
+That table can then be periodically processed (using the
+ProcessCallGraphBuffers function) to create the call graph information.  In this
+session, you will probably also want to set the configuration parameter
+"call_graph.enable" to false to avoid generating data for the
+ProcessCallGraphBuffers function.
 
-Note that installing the extension grants public access to the CallGraphBuffer table, which means
-that malicious users can add bogus data into the table.
+Note that installing the extension grants public access to the CallGraphBuffer
+table, which means that malicious users can add bogus data into the table.
