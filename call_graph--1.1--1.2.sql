@@ -135,7 +135,7 @@ LOOP
 		RETURNING CallGraphBufferID, relid
 	)
 	INSERT INTO TableUsage (CallGraphID, relid)
-	SELECT _CallGraphID, relid
+	SELECT DISTINCT _CallGraphID, relid
 	FROM Buffers tub
 	WHERE
 		NOT EXISTS
