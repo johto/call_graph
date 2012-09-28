@@ -215,7 +215,7 @@ SubGraphEdgeWorkTable (EdgeID, CallGraphID, SubGraphID, Callee, SeenEdges, Shoul
 -- Create a processed list of edges, marking which subgraph they are part of (if any)
 SELECT
 	CASE WHEN SubGraphEdges.EdgeID IS NULL THEN 'e' ELSE 's' END AS EdgeType,
-	COALESCE('s'||SubGraphEdges.SubGraphID, TopLevelFunction::text) AS GraphID,
+	COALESCE('s'||SubGraphEdges.SubGraphID, 't'||TopLevelFunction::text) AS GraphID,
 	TopLevelFunction,
 	Edges.EdgeID, Edges.CallGraphID, Caller, Callee, Edges.Calls, Edges.TotalTime, Edges.SelfTime
 FROM

@@ -258,10 +258,6 @@ SQL
 	# .. and finally, draw all of the graphs
 	foreach my $node (keys %nodes)
 	{
-		# don't generate graphs for top level functions; create_graphs.pl would
-		# just overwrite the ones we drew
-		next if $nodes{$node}{'istoplevelfunction'};
-
 		draw_graph($graphdir, $node, \%nodes);
 	}
 }
