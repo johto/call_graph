@@ -105,7 +105,7 @@ sub draw_graph
 	my %nodes = %$nodesref;
 	my $callgraphsref = $nodes{$center_node}{'callgraphs'};
 
-	open(my $pipe, "| dot -Tsvg -o $graphdir/$center_node.svg") or die ("could not fork");
+	open(my $pipe, "| dot -Tsvg -o $graphdir/$center_node.svg") or die "could not fork";
 
 	print $pipe "strict digraph graph1 {\n";
 
@@ -129,7 +129,7 @@ sub draw_graph
 	print $pipe "}\n";
 
 	close($pipe);
-	die("dot failed for graph $center_node") if $? != 0;
+	die "dot failed for graph $center_node" if $? != 0;
 }
 
 sub generate_per_function_graphs

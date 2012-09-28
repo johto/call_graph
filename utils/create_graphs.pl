@@ -28,16 +28,16 @@ sub parse_config_file
 
 	my $parser = q{^\s*($|(;.*)|((\w+)\s*=([^;]+)(;.*)?))\s*$};
 
-	open(CONFFILE, $filename) or die("Could not open config file $filename");
+	open(CONFFILE, $filename) or die "Could not open config file $filename";
 	while (my $line = <CONFFILE>)
 	{
 		chomp($line);
-		die("Syntax error on line $. in $filename\n") if ($line !~ $parser);
+		die "Syntax error on line $. in $filename\n" if ($line !~ $parser);
 
 		next if (!defined $4);
 		
 		# remember to check for SubGraphs separately
-		die("Unrecognized configuration parameter \"$4\"\n") if ($4 ne 'SubGraphs' && !exists $params->{$4});
+		die "Unrecognized configuration parameter \"$4\"\n" if ($4 ne 'SubGraphs' && !exists $params->{$4});
 		$params->{$4} = $5;
 	}
 
@@ -531,7 +531,7 @@ $dbh = undef;
 
 # Generate an HTML file
 
-open(HTML, '>', $htmlfile) or die("could not open $htmlfile");
+open(HTML, '>', $htmlfile) or die "could not open $htmlfile";
 print HTML "<!DOCTYPE html>\n";
 print HTML "<html>\n";
 print HTML "<head><title>graphs</title></head>\n";
