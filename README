@@ -13,6 +13,13 @@ you need to enable the call_graph.enable GUC.  You can do that on a per-session
 (or even per-transaction) basis, or you can set it in postgresql.conf.  See the
 official PostgreSQL documentation for more information.
 
+It is also possible to track table usage information for each call graph.
+However, currently this feature is implemented using the
+pg_stat_xact_user_tables view, which only allows us to reliably track table
+usage if "autocommit" is in effect.  Information gathered without "autocommit"
+will be silently discarded by the module.  You can enable table usage tracking
+by setting  call_graph.track_table_usage.
+
 To avoid lock contention the backends only append data into an unlogged table.
 That table can then be periodically processed (using the
 ProcessCallGraphBuffers function) to create the call graph information.  In this

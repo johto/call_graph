@@ -6,13 +6,30 @@
 ;	SubGraphs:			A comma-separated list of subgraphs in the form TopLevelFunction.SubGraphEntryFunction.
 ;						Note that the function names are case sensitive.  The default value is an empty list.
 ;
-;	OidLookupTable		The name of the table which should be used to convert oids to function names.  The table
-;						should have at least columns "oid" and "proname".  The default value is "pg_proc".
+;	PgProcReplacement	The name of the table which should be used to convert oids to function names.  Refer to
+;						the replacement.tables.README for more information.  The default values is "pg_proc".
+;
+;	PgClassReplacement	The name of the table which should be used to convert oids to table names.  Refer to the
+;						replacement_tables.README for more information.  The default value is "pg_class".
+;
+;	PgConstraintReplacement
+;						The name of the table which should be used to look up FOREIGN KEY relations between
+;						tables.  Refer to the replacement_tables.README for more information.  The default value
+;						is "pg_constraint".
+;
+;	PgNamespaceReplacement
+;						The name of the table which should be used to convert oids to schema names.  Refer to the
+;						replacement_tables.README for more information.  The default values is "pg_namespace".
 ;
 ;	GeneratePerFunctionGraphs
 ;						If enabled, the script will generate a graph for each function showing all paths
 ;						leading to, and called by that particular function.  Note that this may significantly
 ;						increase the time it takes to run create_graphs.pl.  The default value is "yes".
+;
+;	GenerateTableUsageInformation
+;						If enabled, the script will attempt to generate a graph for each top level function
+;						showing information about all the tables utilized in calls to that particular top level
+;						function.  See the README for more information.
 ;
 ;
 ;	EdgeColor:			The color used for edges.  Refer to the graphviz manual for more information on accepted
@@ -90,10 +107,7 @@ NodeShape = CASE WHEN NodeIsSubGraphEntryFunction THEN 'box' ELSE 'ellipse' END
 ; rendering the actual subgraph.
 NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END 
 
-; Look up function names from a table other than pg_proc
-OidLookupTable = fake_pgproc
-
-; Generate per-function graphs (but see above)
+; Generate per-function graphs (but see the documentation at the beginning of this file)
 GeneratePerFunctionGraphs = yes
 
 ; Add clickable links to per-function graphs

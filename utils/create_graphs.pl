@@ -5,7 +5,8 @@ use warnings;
 use DBI;
 use DBD::Pg;
 
-require "generate_per_function_graphs.pl";
+require PerFunctionGraphs;
+require TableUsageGraphs;
 
 # Debug the dot file format (writes .dot files in the graphs/ directory instead
 # of rendering graphs).
@@ -17,6 +18,22 @@ sub trim
 	my $var = shift @_;
 	$var =~ s/^\s+|\s+$//g;
 	return $var;
+}
+
+sub parse_boolean
+{
+	my ($params, $param_name, $default_value) = @_;
+
+	$params->{$param_name} = $default_value if !defined $params->{$param_name};
+
+	my $value = trim($params->{$param_name});
+
+	if ($value eq 'yes' || $value eq '1' || $value eq 'true')
+		{ $params->{$param_name} = 1; }
+	elsif ($value eq 'no' || $value eq '0' || $value eq 'false')
+		{ $params->{$param_name} = 0; } 
+	else
+		{ die "Unrecognized input \"$value\" for $param_name"; }
 }
 
 # XXX At some point it might make sense to use a real parser (Config::IniFiles
@@ -45,21 +62,8 @@ sub parse_config_file
 	# XXX Here we have to special case some configuration parameters that have a
 	# special data type.  It's not yet too ugly, but slowly going that way..
 
-	if (defined $params->{GeneratePerFunctionGraphs})
-	{
-		my $value = trim($params->{GeneratePerFunctionGraphs});
-
-		if ($value eq 'yes' || $value eq '1' || $value eq 'true')
-			{ $params->{GeneratePerFunctionGraphs} = 1; }
-		elsif ($value eq 'no' || $value eq '0' || $value eq 'false')
-			{ $params->{GeneratePerFunctionGraphs} = 0; } 
-		else
-			{ die "Unrecognized input \"$value\" for GeneratePerFunctionGraphs"; }
-	}
-	else
-	{
-		$params->{GeneratePerFunctionGraphs} = 1;
-	}
+	parse_boolean($params, "GeneratePerFunctionGraphs", "true");
+	parse_boolean($params, "GenerateTableUsageGraphs", "false");
 
 	# The user can specify a list of functions which are then separated from the
 	# actual graph they would otherwise be in, creating separate subgraphs.
@@ -106,8 +110,12 @@ my %params =
 	# deal with them
 	SubGraphs					=>		undef,
 	GeneratePerFunctionGraphs	=>		undef,
+	GenerateTableUsageGraphs	=>		undef,
 
-	OidLookupTable				=>		"\"pg_proc\"",
+	PgProcReplacement			=>		"\"pg_proc\"",
+	PgConstraintReplacement		=>		"\"pg_constraint\"",
+	PgClassReplacement			=>		"\"pg_class\"",
+	PgNamespaceReplacement		=>		"\"pg_namespace\"",
 
 	EdgeColor					=>		"'black'",
 	EdgeStyle					=>		"'solid'",
@@ -122,6 +130,11 @@ my %params =
 );
 
 parse_config_file($config_file, \%params);
+
+my $system_catalogs = { pg_proc			=> $params{PgProcReplacement},
+						pg_constraint	=> $params{PgConstraintReplacement},
+						pg_class		=> $params{PgClassReplacement},
+						pg_namespace	=> $params{PgNamespaceReplacement} };
 
 my $subgraph_params_query = 
 <<"SQL";
@@ -144,10 +157,10 @@ FROM
 		unnest(\$1::text[]) SubGraphInput (val)
 ) SubGraphs (TopLevelFunction, EntryFunction)
 JOIN
-	$params{OidLookupTable} tlf
+	$system_catalogs->{pg_proc} tlf
 		ON (tlf.proname = SubGraphs.TopLevelFunction)
 JOIN
-	$params{OidLookupTable} ef
+	$system_catalogs->{pg_proc} ef
 		ON (ef.proname = SubGraphs.EntryFunction)
 GROUP BY tlf.proname, ef.proname
 ;
@@ -334,7 +347,7 @@ FROM
 			SubGraphParams
 	) Edges
 	JOIN
-		$params{OidLookupTable} proclookup
+		$system_catalogs->{pg_proc} proclookup
 			ON (proclookup.oid = Edges.Callee)
 	GROUP BY
 		GraphID, TopLevelFunction, Callee, proclookup.proname, proclookup.oid, NodeIsGraphEntryFunction
@@ -363,7 +376,7 @@ FROM
 		FROM
 			Edges
 		JOIN
-			$params{OidLookupTable} proclookup
+			$system_catalogs->{pg_proc} proclookup
 				ON (proclookup.oid = Edges.Callee)
 		JOIN
 			call_graph.CallGraphs cg
@@ -383,7 +396,7 @@ FROM
 			SubGraphParams sgp
 				ON (e.TopLevelFunction = sgp.TopLevelFunction and e.Callee = sgp.EntryFunction)
 		JOIN
-			$params{OidLookupTable} proclookup
+			$system_catalogs->{pg_proc} proclookup
 				ON (proclookup.oid = sgp.EntryFunction)
 	) EntryEdges
 	GROUP BY GraphID, EntryFunctionName
@@ -400,8 +413,13 @@ $dbh->begin_work();
 
 if ($params{GeneratePerFunctionGraphs})
 {
-	# defined in generate_per_function_graphs.pl
-	generate_per_function_graphs($graphdir, $dbh, $params{OidLookupTable});
+	PerFunctionGraphs::generate_per_function_graphs($graphdir, $dbh, $system_catalogs);
+}
+
+my $table_usage_graphs = {};
+if ($params{GenerateTableUsageGraphs})
+{
+	$table_usage_graphs = TableUsageGraphs::generate_table_usage_graphs($graphdir, $dbh, $system_catalogs);
 }
 
 my $sth = $dbh->prepare($subgraph_params_query);
@@ -529,7 +547,7 @@ $dbh->disconnect();
 $dbh = undef;
 
 
-# Generate an HTML file
+# Generate the HTML index
 
 open(HTML, '>', $htmlfile) or die "could not open $htmlfile";
 print HTML "<!DOCTYPE html>\n";
@@ -548,9 +566,27 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 
 	print HTML "<tr>\n";
 	print HTML "<td rowspan=2><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
-	print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
+	print HTML "<td colspan=6><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
 	print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
-	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
+	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td>\n";
+
+	if ($params{GenerateTableUsageGraphs})
+	{
+		# if this is a top level function and not a subgraph, see if we have
+		# table usage information available
+		if ($key =~ /t([0-9]+)/ &&
+			exists $table_usage_graphs->{$1} &&
+			(my $ntables = scalar keys %{$table_usage_graphs->{$1}->{tables}}) > 0)
+		{
+			print HTML "<td><a href=\"r$1.svg\">Utilizes $ntables tables</a></td>\n";
+		}
+		else
+		{
+			print HTML "<td>No table<br />information available</td>\n";
+		}
+	}
+
+	print HTML "</tr>\n";
 
 	++$i;
 }

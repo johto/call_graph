@@ -5,6 +5,18 @@ use warnings;
 use DBI;
 use DBD::Pg;
 
+package PerFunctionGraphs;
+
+BEGIN
+{
+    require Exporter;
+
+    our $VERSION = 1.00;
+
+    our @ISA = qw(Exporter);
+
+    our @EXPORT = qw(generate_per_function_graphs);
+}
 
 # return true if the two input hashes have any keys in common, false otherwise
 sub hash_overlap
@@ -139,7 +151,7 @@ sub generate_per_function_graphs
 	my $node;
 	my %nodes;
 	
-	my ($graphdir, $dbh, $oid_lookup_table) = @_;
+	my ($graphdir, $dbh, $system_catalogs) = @_;
 
 	my $edge_query = 
 <<"SQL";
@@ -155,7 +167,7 @@ SQL
 	SELECT
 		oid, proname
 	FROM
-		$oid_lookup_table
+		$system_catalogs->{pg_proc}
 SQL
 	;
 
@@ -180,7 +192,7 @@ SQL
 	if ($sth->rows <= 0)
 	{
 		# shouldn't happen
-		die "could not get a list of functions from $oid_lookup_table";
+		die "could not get a list of functions from $system_catalogs->{pg_proc}";
 	}
 
 	my %functions;
@@ -202,7 +214,7 @@ SQL
 		{
 			if (!exists $nodes{$callee})
 			{
-				die "function $callee not present in oid lookup table" unless exists $functions{$callee};
+				die "function $callee not present in $system_catalogs->{pg_proc}" unless exists $functions{$callee};
 			
 				$nodes{$callee} = { predecessors => {},
 									successors => {},
@@ -221,7 +233,7 @@ SQL
 
 		if (!exists $nodes{$caller})
 		{
-			die "function $caller not present in oid lookup table" unless exists $functions{$caller};
+			die "function $caller not present in $system_catalogs->{pg_proc}" unless exists $functions{$caller};
 
 			$nodes{$caller} = { predecessors => {},
 								successors => { $callee => 1 },
@@ -240,7 +252,7 @@ SQL
 
 		if (!exists $nodes{$callee})
 		{
-			die "function $callee not present in oid lookup table" unless exists $functions{$callee};
+			die "function $callee not present in $system_catalogs->{pg_proc}" unless exists $functions{$callee};
 
 			$nodes{$callee} = { predecessors => { $caller => 1 },
 								successors => {},
@@ -261,4 +273,9 @@ SQL
 		draw_graph($graphdir, $node, \%nodes);
 	}
 }
+
+END
+{
+}
+
 1;
