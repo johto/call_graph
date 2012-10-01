@@ -131,7 +131,7 @@ static void process_edge_data()
 						  "   VALUES ($1, $2, $3, $4, $5, $6, $7)													",
 						  7, argtypes);
 	if (!planptr)
-		elog(ERROR, "could not prepare an SPI plan for call graph buffer");
+		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
 
 	args[0] = get_session_identifier();
 	args[1] = ObjectIdGetDatum(top_level_function_oid);
@@ -178,7 +178,7 @@ static void process_edge_data()
 								  1, argtypes);
 
 			if (!planptr)
-				elog(ERROR, "could not prepare an SPI plan for call graph buffer");
+				elog(ERROR, "could not prepare an SPI plan for the INSERT into TableAccessBuffer");
 
 			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
 				elog(ERROR, "SPI_execp() failed: %d", ret);
