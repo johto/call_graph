@@ -5,8 +5,6 @@
 
 CREATE OR REPLACE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.3'; $$ LANGUAGE sql;
 
-DROP INDEX TableUsage_CallGraphID_Index;
-
 ALTER TABLE TableUsage ADD PRIMARY KEY (CallGraphID, relid);
 
 -- first, add the columns with DEFAULT 0 so the existing rows' columns all get
