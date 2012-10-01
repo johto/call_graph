@@ -1,71 +1,39 @@
-/* call_graph/call_graph--1.2.sql */
+/* call_graph/call_graph--1.2--1.3.sql */
 
--- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION call_graph" to load this file. \quit
+-- complain if script is sourced in psql, rather than via ALTER EXTENSION
+\echo Use "ALTER EXTENSION UPDATE" to load this file. \quit
 
-GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
+CREATE OR REPLACE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.3'; $$ LANGUAGE sql;
 
-CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.2'; $$ LANGUAGE sql;
+DROP INDEX TableUsage_CallGraphID_Index;
 
-CREATE SEQUENCE seqCallGraphBuffer;
-CREATE UNLOGGED TABLE CallGraphBuffer(
-CallGraphBufferID bigint NOT NULL,
-TopLevelFunction oid NOT NULL CHECK (TopLevelFunction <> '0'),
-Caller oid NOT NULL,
-Callee oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-Datestamp timestamptz NOT NULL default now()
-);
+ALTER TABLE TableUsage ADD PRIMARY KEY (CallGraphID, relid);
 
-CREATE UNLOGGED TABLE TableAccessBuffer(
-CallGraphBufferID bigint NOT NULL,
-relid oid NOT NULL
-);
+-- first, add the columns with DEFAULT 0 so the existing rows' columns all get
+-- assigned to 0
+ALTER TABLE TableUsage ADD COLUMN seq_scan bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN seq_tup_read bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN idx_scan bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN idx_tup_read bigint NOT NULL DEFAULT 0;
 
--- make sure all users are allowed to track data
-GRANT USAGE ON SEQUENCE seqCallGraphBuffer TO PUBLIC;
-GRANT INSERT ON TABLE CallGraphBuffer TO PUBLIC;
-GRANT INSERT ON TABLE TableAccessBuffer TO PUBLIC;
+ALTER TABLE TableAccessBuffer ADD COLUMN seq_scan bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN seq_tup_read bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN idx_scan bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN idx_tup_read bigint NOT NULL DEFAULT 0;
 
-CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
-CREATE INDEX TableAccessBuffer_CallGraphBufferID_Index ON TableAccessBuffer(CallGraphBufferID);
+-- .. and then remove the default
+ALTER TABLE TableUsage ALTER COLUMN seq_scan DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN seq_tup_read DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN idx_scan DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN idx_tup_read DROP DEFAULT;
 
-CREATE TABLE CallGraphs(
-CallGraphID bigserial NOT NULL,
-TopLevelFunction oid NOT NULL,
-EdgesHash text NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-FirstCall timestamptz NOT NULL,
-LastCall timestamptz NOT NULL,
-PRIMARY KEY (CallGraphID),
-UNIQUE (TopLevelFunction, EdgesHash)
-);
-
-CREATE TABLE Edges(
-EdgeID bigserial NOT NULL,
-CallGraphID int NOT NULL REFERENCES CallGraphs(CallGraphID),
-Caller Oid NOT NULL,
-Callee Oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-PRIMARY KEY (EdgeID),
-UNIQUE (CallGraphID, Caller, Callee)
-);
-
-CREATE TABLE TableUsage(
-CallGraphID bigint NOT NULL,
-relid oid NOT NULL
-);
-
-CREATE INDEX TableUsage_CallGraphID_Index ON TableUsage(CallGraphID);
+ALTER TABLE TableAccessBuffer ALTER COLUMN seq_scan DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN seq_tup_read DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN idx_scan DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN idx_tup_read DROP DEFAULT;
 
 -- replace ProcessCallGraphBuffers()
-CREATE OR REPLACE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
+CREATE OR REPLACE FUNCTION call_graph.ProcessCallGraphBuffers(_MaxBufferCount bigint)
  RETURNS SETOF bigint
  LANGUAGE plpgsql
  SET search_path TO @extschema@
@@ -181,20 +149,47 @@ LOOP
 
     DELETE FROM CallGraphBuffer WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs);
 
-	-- We can process the table usage buffers in one go since we don't (currently) need to UPDATE any
-	-- previously existing values.
 	WITH Buffers AS (
-		DELETE FROM TableAccessBuffer
-		WHERE CallGraphBufferID = ANY(_.CallGraphBufferIDs)
-		RETURNING CallGraphBufferID, relid
+		DELETE FROM
+			TableAccessBuffer
+		WHERE
+			CallGraphBufferID = ANY(_.CallGraphBufferIDs)
+		RETURNING
+			relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read
+	),
+	GroupedBuffers AS (
+		SELECT
+			relid, sum(seq_scan) AS seq_scan, sum(seq_tup_read) AS seq_tup_read,
+				   sum(idx_scan) AS idx_scan, sum(idx_tup_read) AS idx_tup_read
+		FROM
+			Buffers
+		GROUP BY
+			relid
+	),
+	UpdateExisting AS (
+		UPDATE
+			TableUsage tu
+		SET
+			seq_scan = tu.seq_scan + buf.seq_scan,
+			seq_tup_read = tu.seq_tup_read + buf.seq_tup_read,
+			idx_scan = tu.idx_scan + buf.idx_scan,
+			idx_tup_read = tu.idx_tup_read + buf.idx_tup_read
+		FROM
+			GroupedBuffers buf
+		WHERE
+			tu.CallGraphID = _CallGraphID AND
+			tu.relid = buf.relid
 	)
-	INSERT INTO TableUsage (CallGraphID, relid)
-	SELECT DISTINCT _CallGraphID, relid
-	FROM Buffers tub
+	INSERT INTO
+		TableUsage (CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read)
+	SELECT
+		_CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_Read
+	FROM
+		GroupedBuffers buf
 	WHERE
 		NOT EXISTS
 		(SELECT * FROM TableUsage tu
-		 WHERE tu.CallGraphID = _CallGraphID AND tu.relid = tub.relid);
+		 WHERE tu.CallGraphID = _CallGraphID AND tu.relid = buf.relid);
 
 	RETURN NEXT _CallGraphID;
 END LOOP;

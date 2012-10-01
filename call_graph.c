@@ -164,15 +164,21 @@ static void process_edge_data()
 
 			/* args[0] was set to the correct value above */
 
-			planptr = SPI_prepare("INSERT INTO															"
-								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid)			"
-								  "SELECT																"
-								  "   $1, relid															"
-								  "FROM																	"
-								  "   pg_stat_xact_user_tables											"
-								  "WHERE																"
-								  "   seq_scan > 0 OR idx_scan > 0										",
+			planptr = SPI_prepare("INSERT INTO																			"
+								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,	"
+								  "									idx_scan, idx_tup_read)								"
+								  "SELECT																				"
+								  "   $1, relid, seq_scan, seq_tup_read,												"
+								  /* idx_* columns might be NULL if there are no indexes on the table */
+								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_read, 0)									"
+								  "FROM																					"
+								  "   pg_stat_xact_user_tables															"
+								  "WHERE																				"
+								  "   seq_scan > 0 OR idx_scan > 0														",
 								  1, argtypes);
+
+			if (!planptr)
+				elog(ERROR, "could not prepare an SPI plan for call graph buffer");
 
 			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
 				elog(ERROR, "SPI_execp() failed: %d", ret);
