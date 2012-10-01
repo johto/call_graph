@@ -170,7 +170,7 @@ static void process_edge_data()
 								  "SELECT																				"
 								  "   $1, relid, seq_scan, seq_tup_read,												"
 								  /* idx_* columns might be NULL if there are no indexes on the table */
-								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_read, 0)									"
+								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0)									"
 								  "FROM																					"
 								  "   pg_stat_xact_user_tables															"
 								  "WHERE																				"
