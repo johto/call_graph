@@ -124,16 +124,9 @@ SQL
 										 n_tup_del => $row->{n_tup_del}
 										 };
 		}
-		else
-		{
-			$tables->{$row->{relid}}->{seq_scan} += $row->{seq_scan};
-			$tables->{$row->{relid}}->{seq_tup_read} += $row->{seq_tup_read};
-			$tables->{$row->{relid}}->{idx_scan} += $row->{idx_scan};
-			$tables->{$row->{relid}}->{idx_tup_read} += $row->{idx_tup_read};
-			$tables->{$row->{relid}}->{n_tup_ins} += $row->{n_tup_ins};
-			$tables->{$row->{relid}}->{n_tup_upd} += $row->{n_tup_upd};
-			$tables->{$row->{relid}}->{n_tup_del} += $row->{n_tup_del};
-		}
+		
+		# Note that if the row exists, we don't want to do anything to the statistics;
+		# those are duplicated for each confrelid and summing them would be wrong.
 
 		if (defined $row->{confrelid})
 		{
