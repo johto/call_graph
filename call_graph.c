@@ -166,15 +166,17 @@ static void process_edge_data()
 
 			planptr = SPI_prepare("INSERT INTO																			"
 								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,	"
-								  "									idx_scan, idx_tup_read)								"
+								  "									idx_scan, idx_tup_read,								"
+								  "									n_tup_ins, n_tup_upd, n_tup_del)					"
 								  "SELECT																				"
 								  "   $1, relid, seq_scan, seq_tup_read,												"
 								  /* idx_* columns might be NULL if there are no indexes on the table */
-								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0)									"
+								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
+								  "   n_tup_ins, n_tup_upd, n_tup_del													"
 								  "FROM																					"
 								  "   pg_stat_xact_user_tables															"
 								  "WHERE																				"
-								  "   seq_scan > 0 OR idx_scan > 0														",
+								  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
 								  1, argtypes);
 
 			if (!planptr)

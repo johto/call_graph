@@ -38,15 +38,15 @@ sub draw_graph
 		my $tref = $tables->{$table};
 		print $pipe "\"$table\" [label=\"<name> $tref->{relname}|" .
 					"sequential scans: $tref->{seq_scan}|avg seq tuples: $tref->{seq_tup_read}|" .
-					"index scans: $tref->{idx_scan}|avg idx tuples: $tref->{idx_tup_read}\"]\n";
+					"index scans: $tref->{idx_scan}|avg idx tuples: $tref->{idx_tup_read}|" .
+					"inserted rows: $tref->{n_tup_ins}|updated rows: $tref->{n_tup_upd}|" .
+					"deleted rows: $tref->{n_tup_del}\"]\n";
 	}
 
 	print $pipe "}\n";
 
 	close($pipe);
 	die "dot failed for table graph $toplevelfunction" if $? != 0;
-
-	return scalar keys %{$tables};
 }
 
 sub generate_table_usage_graphs
@@ -58,7 +58,9 @@ sub generate_table_usage_graphs
 	WITH TopLevelFunctionTableUsage AS (
 	    SELECT
 	        TopLevelFunction, relid, sum(seq_scan) AS seq_scan, sum(seq_tup_read) AS seq_tup_read,
-	                                 sum(idx_scan) AS idx_scan, sum(idx_tup_read) AS idx_tup_read
+	                                 sum(idx_scan) AS idx_scan, sum(idx_tup_read) AS idx_tup_read,
+									 sum(n_tup_ins) AS n_tup_ins, sum(n_tup_upd) AS n_tup_upd,
+									 sum(n_tup_del) AS n_tup_del
 	    FROM
 	        call_graph.TableUsage tu
 	    JOIN
@@ -70,9 +72,10 @@ sub generate_table_usage_graphs
 	SELECT
 	    tu.TopLevelFunction AS TopLevelFunction, tlf.proname AS TopLevelFunctionName,
 		tu.relid AS relid, pg_class.relname AS relname,
+		pg_constraint.confrelid AS confrelid,
 		seq_scan, CASE WHEN seq_scan > 0 THEN round(seq_tup_read / seq_scan::numeric, 2) ELSE 0 END AS seq_tup_read,
 		idx_scan, CASE WHEN idx_scan > 0 THEN round(idx_tup_read / idx_scan::numeric, 2) ELSE 0 END AS idx_tup_read,
-		pg_constraint.confrelid AS confrelid
+		n_tup_ins, n_tup_upd, n_tup_del
 	FROM
 	    TopLevelFunctionTableUsage tu
 	JOIN
@@ -111,11 +114,15 @@ SQL
 		if (!exists $tables->{$row->{relid}})
 		{
 			$tables->{$row->{relid}} = { relname => $row->{relname},
+										 confrelids => [],
 										 seq_scan => $row->{seq_scan},
 										 seq_tup_read => $row->{seq_tup_read},
 										 idx_scan => $row->{idx_scan},
 										 idx_tup_read => $row->{idx_tup_read},
-										 confrelids => [] };
+										 n_tup_ins => $row->{n_tup_ins},
+										 n_tup_upd => $row->{n_tup_upd},
+										 n_tup_del => $row->{n_tup_del}
+										 };
 		}
 		else
 		{
@@ -123,6 +130,9 @@ SQL
 			$tables->{$row->{relid}}->{seq_tup_read} += $row->{seq_tup_read};
 			$tables->{$row->{relid}}->{idx_scan} += $row->{idx_scan};
 			$tables->{$row->{relid}}->{idx_tup_read} += $row->{idx_tup_read};
+			$tables->{$row->{relid}}->{n_tup_ins} += $row->{n_tup_ins};
+			$tables->{$row->{relid}}->{n_tup_upd} += $row->{n_tup_upd};
+			$tables->{$row->{relid}}->{n_tup_del} += $row->{n_tup_del};
 		}
 
 		if (defined $row->{confrelid})

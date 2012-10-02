@@ -13,22 +13,34 @@ ALTER TABLE TableUsage ADD COLUMN seq_scan bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableUsage ADD COLUMN seq_tup_read bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableUsage ADD COLUMN idx_scan bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableUsage ADD COLUMN idx_tup_read bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN n_tup_ins bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN n_tup_upd bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableUsage ADD COLUMN n_tup_del bigint NOT NULL DEFAULT 0;
 
 ALTER TABLE TableAccessBuffer ADD COLUMN seq_scan bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableAccessBuffer ADD COLUMN seq_tup_read bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableAccessBuffer ADD COLUMN idx_scan bigint NOT NULL DEFAULT 0;
 ALTER TABLE TableAccessBuffer ADD COLUMN idx_tup_read bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN n_tup_ins bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN n_tup_upd bigint NOT NULL DEFAULT 0;
+ALTER TABLE TableAccessBuffer ADD COLUMN n_tup_del bigint NOT NULL DEFAULT 0;
 
 -- .. and then remove the default
 ALTER TABLE TableUsage ALTER COLUMN seq_scan DROP DEFAULT;
 ALTER TABLE TableUsage ALTER COLUMN seq_tup_read DROP DEFAULT;
 ALTER TABLE TableUsage ALTER COLUMN idx_scan DROP DEFAULT;
 ALTER TABLE TableUsage ALTER COLUMN idx_tup_read DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN n_tup_ins DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN n_tup_upd DROP DEFAULT;
+ALTER TABLE TableUsage ALTER COLUMN n_tup_del DROP DEFAULT;
 
 ALTER TABLE TableAccessBuffer ALTER COLUMN seq_scan DROP DEFAULT;
 ALTER TABLE TableAccessBuffer ALTER COLUMN seq_tup_read DROP DEFAULT;
 ALTER TABLE TableAccessBuffer ALTER COLUMN idx_scan DROP DEFAULT;
 ALTER TABLE TableAccessBuffer ALTER COLUMN idx_tup_read DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN n_tup_ins DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN n_tup_upd DROP DEFAULT;
+ALTER TABLE TableAccessBuffer ALTER COLUMN n_tup_del DROP DEFAULT;
 
 -- replace ProcessCallGraphBuffers()
 CREATE OR REPLACE FUNCTION call_graph.ProcessCallGraphBuffers(_MaxBufferCount bigint)
