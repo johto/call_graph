@@ -80,6 +80,12 @@ sub parse_config_file
 	}
 }
 
+sub create_directory
+{
+	my $dir = shift @_;
+	die "could not create directory $dir: $!" if !-d $dir && !mkdir $dir;
+}
+
 
 #
 # MAIN PROGRAM STARTS HERE
@@ -99,6 +105,9 @@ if (@ARGV != 3)
 }
 
 my $graphdir = $ARGV[0];
+my $per_function_graphdir = $graphdir . "/perfunction";
+my $table_usage_graphdir = $graphdir . "/tableusage";
+
 my $config_file = $ARGV[1];
 my $dbname = $ARGV[2];
 my $htmlfile = $graphdir."/index.html";
@@ -130,6 +139,10 @@ my %params =
 );
 
 parse_config_file($config_file, \%params);
+
+create_directory($graphdir);
+create_directory($per_function_graphdir) if ($params{GeneratePerFunctionGraphs});
+create_directory($table_usage_graphdir) if ($params{GenerateTableUsageGraphs});
 
 my $system_catalogs = { pg_proc			=> $params{PgProcReplacement},
 						pg_constraint	=> $params{PgConstraintReplacement},
@@ -413,13 +426,13 @@ $dbh->begin_work();
 
 if ($params{GeneratePerFunctionGraphs})
 {
-	PerFunctionGraphs::generate_per_function_graphs($graphdir, $dbh, $system_catalogs);
+	PerFunctionGraphs::generate_per_function_graphs($per_function_graphdir, $dbh, $system_catalogs);
 }
 
 my $table_usage_graphs = {};
 if ($params{GenerateTableUsageGraphs})
 {
-	$table_usage_graphs = TableUsageGraphs::generate_table_usage_graphs($graphdir, $dbh, $system_catalogs);
+	$table_usage_graphs = TableUsageGraphs::generate_table_usage_graphs($table_usage_graphdir, $dbh, $system_catalogs);
 }
 
 my $sth = $dbh->prepare($subgraph_params_query);
@@ -578,7 +591,7 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 			exists $table_usage_graphs->{$1} &&
 			(my $ntables = scalar keys %{$table_usage_graphs->{$1}->{tables}}) > 0)
 		{
-			print HTML "<td><a href=\"r$1.svg\">Utilizes $ntables tables</a></td>\n";
+			print HTML "<td><a href=\"tableusage/tlf$1.svg\">Utilizes $ntables tables</a></td>\n";
 		}
 		else
 		{

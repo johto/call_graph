@@ -22,7 +22,7 @@ sub draw_graph
 {
 	my ($graphdir, $toplevelfunction, $graph) = @_;
 
-	open(my $pipe, "| dot -Tsvg -o $graphdir/r$toplevelfunction.svg") or die "could not fork";
+	open(my $pipe, "| dot -Tsvg -o $graphdir/tlf$toplevelfunction.svg") or die "could not fork";
 
 	print $pipe "strict digraph $graph->{toplevelfunctionname} {\n";
 	print $pipe "rankdir = LR;\nnode [shape=record]\n";
