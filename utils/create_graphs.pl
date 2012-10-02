@@ -578,10 +578,10 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 	next if $value->{'totalcalls'} == 0;
 
 	print HTML "<tr>\n";
-	print HTML "<td rowspan=2><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
-	print HTML "<td colspan=6><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
+	print HTML "<td rowspan=3><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
+	print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
 	print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
-	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td>\n";
+	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
 
 	if ($params{GenerateTableUsageGraphs})
 	{
@@ -591,12 +591,28 @@ foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %
 			exists $table_usage_graphs->{$1} &&
 			(my $ntables = scalar keys %{$table_usage_graphs->{$1}->{tables}}) > 0)
 		{
-			print HTML "<td><a href=\"tableusage/tlf$1.svg\">Utilizes $ntables tables</a></td>\n";
+			my $tables = $table_usage_graphs->{$1}->{tables};
+
+			print HTML "<tr><td colspan=5><table border=1 style=\"border: 1px solid lightgray; border-collapse: collapse\">\n";
+			print HTML "<tr><th>table</th><th>seq_scan</th><th>seq_tup_read</th><th>idx_scan</th><th>idx_tup_read</th>\n";
+			print HTML "<th>n_tup_ins</th><th>n_tup_upd</th><th>n_tup_del</th></tr>\n";
+			foreach my $tablekey (sort keys %{$tables})
+			{
+				my $table = $tables->{$tablekey};
+				print HTML "<tr><td>$table->{relname}</td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
+				print HTML "<td>$table->{idx_scan}</td><td>$table->{idx_tup_read}</td>\n";
+				print HTML "<td>$table->{n_tup_ins}</td><td>$table->{n_tup_upd}</td><td>$table->{n_tup_del}</td></tr>\n";
+			}
+			print HTML "</table><br /><a href=\"tableusage/tlf$1.svg\">view table information</a></td></tr>\n";
 		}
 		else
 		{
-			print HTML "<td>No table<br />information available</td>\n";
+			print HTML "<tr><td colspan=5>No table<br />information available</td></tr>\n";
 		}
+	}
+	else
+	{
+		print HTML "<tr><td colspan=5>&nbsp;</td></tr>\n";
 	}
 
 	print HTML "</tr>\n";
