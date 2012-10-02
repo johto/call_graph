@@ -125,6 +125,49 @@ static void process_edge_data()
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
 
+
+	args[0] = get_session_identifier();
+
+	/* Track table usage before adding data to CallGraphBuffer to avoid it from appearing
+	 * in TableAccessBuffer. */
+	if (track_table_usage)
+	{
+		TimestampTz xact_start, stmt_start;
+
+		xact_start = GetCurrentTransactionStartTimestamp();
+		stmt_start = GetCurrentStatementStartTimestamp();
+
+		/* Only track usage if this was the first query in the transaction */
+		if (timestamp_cmp_internal(xact_start, stmt_start) == 0)
+		{
+			planptr = SPI_prepare("INSERT INTO																			"
+								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,	"
+								  "									idx_scan, idx_tup_read,								"
+								  "									n_tup_ins, n_tup_upd, n_tup_del)					"
+								  "SELECT																				"
+								  "   $1, relid, seq_scan, seq_tup_read,												"
+								  /* idx_* columns might be NULL if there are no indexes on the table */
+								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
+								  "   n_tup_ins, n_tup_upd, n_tup_del													"
+								  "FROM																					"
+								  "   pg_stat_xact_user_tables															"
+								  "WHERE																				"
+								  /* Exclude data for TableAccessBuffer; if we insert any rows before we get to the
+								   * TableAccessBuffer row, it will include the rows we inserted.  We do not want that. */
+								  "   relid <> 'call_graph.TableAccessBuffer'::regclass::oid AND						"
+								  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
+								  1, argtypes);
+
+			if (!planptr)
+				elog(ERROR, "could not prepare an SPI plan for the INSERT into TableAccessBuffer");
+
+			/* args[0] was set above */
+
+			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
+				elog(ERROR, "SPI_execp() failed: %d", ret);
+		}
+	}
+
 	planptr = SPI_prepare("INSERT INTO 																				"
 						  "   call_graph.CallGraphBuffer (CallGraphBufferID, TopLevelFunction, Caller, Callee,		"
 						  "								  Calls, TotalTime, SelfTime)								"
@@ -133,7 +176,7 @@ static void process_edge_data()
 	if (!planptr)
 		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
 
-	args[0] = get_session_identifier();
+	/* args[0] was set above */
 	args[1] = ObjectIdGetDatum(top_level_function_oid);
 
 	hash_seq_init(&hst, edge_hash_table);
@@ -147,44 +190,6 @@ static void process_edge_data()
 
 		if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
 			elog(ERROR, "SPI_execp() failed: %d", ret);
-	}
-
-	if (track_table_usage)
-	{
-		TimestampTz xact_start, stmt_start;
-
-		xact_start = GetCurrentTransactionStartTimestamp();
-		stmt_start = GetCurrentStatementStartTimestamp();
-
-		/* Only track usage if this was the first query in the transaction */
-		if (timestamp_cmp_internal(xact_start, stmt_start) == 0)
-		{
-			argtypes[0] = INT8OID;
-			argtypes[1] = InvalidOid;
-
-			/* args[0] was set to the correct value above */
-
-			planptr = SPI_prepare("INSERT INTO																			"
-								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,	"
-								  "									idx_scan, idx_tup_read,								"
-								  "									n_tup_ins, n_tup_upd, n_tup_del)					"
-								  "SELECT																				"
-								  "   $1, relid, seq_scan, seq_tup_read,												"
-								  /* idx_* columns might be NULL if there are no indexes on the table */
-								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
-								  "   n_tup_ins, n_tup_upd, n_tup_del													"
-								  "FROM																					"
-								  "   pg_stat_xact_user_tables															"
-								  "WHERE																				"
-								  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
-								  1, argtypes);
-
-			if (!planptr)
-				elog(ERROR, "could not prepare an SPI plan for the INSERT into TableAccessBuffer");
-
-			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
-				elog(ERROR, "SPI_execp() failed: %d", ret);
-		}
 	}
 
 	SPI_finish();
