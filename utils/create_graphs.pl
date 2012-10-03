@@ -95,7 +95,7 @@ sub generate_subgraph_html_index
 {
 	my ($htmlfile, $graphs, $subgraph_parent, $table_usage_graphs) = @_;
 
-	generate_html_index_worker($htmlfile, $graphs, undef, $subgraph_parent, $table_usage_graphs);
+	generate_html_index_worker($htmlfile, $graphs, undef, $subgraph_parent, undef);
 }
 
 # small function for trimming configuration parameter input
