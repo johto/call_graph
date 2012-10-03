@@ -25,7 +25,10 @@ relid oid NOT NULL,
 seq_scan bigint NOT NULL,
 seq_tup_read bigint NOT NULL,
 idx_scan bigint NOT NULL,
-idx_tup_read bigint NOT NULL
+idx_tup_read bigint NOT NULL,
+n_tup_ins bigint NOT NULL,
+n_tup_upd bigint NOT NULL,
+n_tup_del bigint NOT NULL
 );
 
 -- make sure all users are allowed to track data
@@ -70,7 +73,7 @@ idx_scan bigint NOT NULL,
 idx_tup_read bigint NOT NULL,
 n_tup_ins bigint NOT NULL,
 n_tup_upd bigint NOT NULL,
-n_tup_del bigint NOT NULL
+n_tup_del bigint NOT NULL,
 
 PRIMARY KEY (CallGraphID, relid)
 );
