@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/perl -w
 
 use strict;
 use warnings;
@@ -11,6 +11,92 @@ require TableUsageGraphs;
 # Debug the dot file format (writes .dot files in the graphs/ directory instead
 # of rendering graphs).
 my $dot_debug = 0;
+
+sub generate_html_index_worker
+{
+	my ($htmlfile, $graphs, $subgraphs, $subgraph_parent, $table_usage_graphs) = @_;
+
+	open(HTML, '>', $htmlfile) or die "could not open $htmlfile";
+	print HTML "<!DOCTYPE html>\n";
+	print HTML "<html>\n";
+	print HTML "<head><title>graphs</title></head>\n";
+	print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">\n";
+
+	# Order the graphs based on complexity; more complex graphs first
+	foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %{$graphs})
+	{
+		my $value = $graphs->{$key};
+
+		# there might be subgraphs with no calls at all
+		next if $value->{totalcalls} == 0;
+
+		next if !defined $subgraph_parent && $value->{issubgraph};
+		next if defined $subgraph_parent && (!defined $value->{parentgraphentryfunctionoid} || $value->{parentgraphentryfunctionoid} != $subgraph_parent);
+
+		my $subgraph_information = "";
+		if (defined $subgraphs && exists $subgraphs->{$value->{entryfunctionoid}})
+		{
+			my $num_subgraphs = scalar @{$subgraphs->{$value->{entryfunctionoid}}};
+			$subgraph_information = "(<a href=\"$value->{entryfunctionoid}.html\">$num_subgraphs subgraphs</a>)";
+		}
+
+		print HTML "<tr>\n";
+		print HTML "<td rowspan=3><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
+		print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'} $subgraph_information</font></td></tr>\n";
+		print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
+		print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
+
+		if (defined $table_usage_graphs)
+		{
+			# see if we have table usage information available
+			if (exists $table_usage_graphs->{$value->{entryfunctionoid}} &&
+				scalar keys %{$table_usage_graphs->{$value->{entryfunctionoid}}->{tables}} > 0)
+			{
+				my $tables = $table_usage_graphs->{$value->{entryfunctionoid}}->{tables};
+
+				print HTML "<tr><td colspan=5><table border=1 style=\"border: 1px solid lightgray; border-collapse: collapse\">\n";
+				print HTML "<tr><th>table</th><th>seq_scan</th><th>seq_tup_read</th><th>idx_scan</th><th>idx_tup_read</th>\n";
+				print HTML "<th>n_tup_ins</th><th>n_tup_upd</th><th>n_tup_del</th></tr>\n";
+				foreach my $tablekey (sort keys %{$tables})
+				{
+					my $table = $tables->{$tablekey};
+					print HTML "<tr><td>$table->{relname}</td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
+					print HTML "<td>$table->{idx_scan}</td><td>$table->{idx_tup_read}</td>\n";
+					print HTML "<td>$table->{n_tup_ins}</td><td>$table->{n_tup_upd}</td><td>$table->{n_tup_del}</td></tr>\n";
+				}
+				print HTML "</table><br /><a href=\"tableusage/tlf$value->{entryfunctionoid}.svg\">View table information</a></td></tr>\n";
+			}
+			else
+			{
+				print HTML "<tr><td colspan=5>No table information available</td></tr>\n";
+			}
+		}
+		else
+		{
+			print HTML "<tr><td colspan=5>&nbsp;</td></tr>\n";
+		}
+
+		print HTML "</tr>\n";
+	}
+
+	print HTML "</tr></table>\n";
+	print HTML "</html>\n";
+	close(HTML);
+}
+
+sub generate_html_index
+{
+	my ($htmlfile, $graphs, $subgraphs, $table_usage_graphs) = @_;
+
+	generate_html_index_worker($htmlfile, $graphs, $subgraphs, undef, $table_usage_graphs);
+}
+
+sub generate_subgraph_html_index
+{
+	my ($htmlfile, $graphs, $subgraph_parent, $table_usage_graphs) = @_;
+
+	generate_html_index_worker($htmlfile, $graphs, undef, $subgraph_parent, $table_usage_graphs);
+}
 
 # small function for trimming configuration parameter input
 sub trim
@@ -110,7 +196,6 @@ my $table_usage_graphdir = $graphdir . "/tableusage";
 
 my $config_file = $ARGV[1];
 my $dbname = $ARGV[2];
-my $htmlfile = $graphdir."/index.html";
 
 # default params
 my %params =
@@ -374,18 +459,25 @@ SQL
 my $statistics_query =
 <<"SQL";
 SELECT
-	GraphID, EntryFunctionName, to_char(FirstCall, 'YYYY-MM-DD HH24:MI:SS') AS FirstCall,
+	GraphID, EntryFunctionOid, EntryFunctionName, IsSubGraph,
+	ParentGraphEntryFunctionOid, ParentGraphEntryFunctionName,
+	to_char(FirstCall, 'YYYY-MM-DD HH24:MI:SS') AS FirstCall,
 	to_char(LastCall, 'YYYY-MM-DD HH24:MI:SS') AS LastCall, TotalCalls, TotalTime, AvgTime
 FROM
 (
 	SELECT
-		GraphID, EntryFunctionName, min(FirstCall) AS FirstCall, max(LastCall) AS LastCall,
+		GraphID, EntryFunctionOid, EntryFunctionName, IsSubGraph,
+		ParentGraphEntryFunctionOid, ParentGraphEntryFunctionName,
+		min(FirstCall) AS FirstCall, max(LastCall) AS LastCall,
 		sum(Calls) AS TotalCalls, round(sum(TotalTime)::numeric, 2) AS TotalTime,
 		round((sum(TotalTime) / sum(Calls))::numeric, 2) AS AvgTime
 	FROM
 	(
 	    SELECT
-			GraphID, Edges.Calls, Edges.TotalTime, proclookup.proname AS EntryFunctionName, FirstCall, LastCall
+			GraphID, proclookup.oid AS EntryFunctionOid, proclookup.proname AS EntryFunctionName,
+			FALSE AS IsSubGraph, NULL AS ParentGraphEntryFunctionOid,
+			NULL AS ParentGraphEntryFunctionName,
+			Edges.Calls, Edges.TotalTime, FirstCall, LastCall
 		FROM
 			Edges
 		JOIN
@@ -400,7 +492,11 @@ FROM
 		UNION ALL
 
 		SELECT
-			's' || sgp.SubGraphID AS GraphID, Calls, TotalTime, proclookup.proname AS EntryFunctionName,
+			's' || sgp.SubGraphID AS GraphID,
+			proclookup.oid AS EntryFunctionOid, proclookup.proname AS EntryFunctionName,
+			TRUE AS IsSubGraph, sgp.TopLevelFunction AS ParentGraphEntryFunctionOid,
+			parentproclookup.proname AS ParentGraphEntryFunctionName,
+			Calls, TotalTime,
 			-- not available for subgraphs
 			NULL AS FirstCall, NULL AS LastCall
 		FROM
@@ -411,8 +507,14 @@ FROM
 		JOIN
 			$system_catalogs->{pg_proc} proclookup
 				ON (proclookup.oid = sgp.EntryFunction)
+		JOIN
+			$system_catalogs->{pg_proc} parentproclookup
+				ON (parentproclookup.oid = sgp.TopLevelFunction)
 	) EntryEdges
-	GROUP BY GraphID, EntryFunctionName
+	GROUP BY
+		GraphID, EntryFunctionOid, EntryFunctionName,
+		IsSubGraph, ParentGraphEntryFunctionOid,
+		ParentGraphEntryFunctionName
 ) ss
 SQL
 ;
@@ -429,7 +531,7 @@ if ($params{GeneratePerFunctionGraphs})
 	PerFunctionGraphs::generate_per_function_graphs($per_function_graphdir, $dbh, $system_catalogs);
 }
 
-my $table_usage_graphs = {};
+my $table_usage_graphs = undef;
 if ($params{GenerateTableUsageGraphs})
 {
 	$table_usage_graphs = TableUsageGraphs::generate_table_usage_graphs($table_usage_graphdir, $dbh, $system_catalogs);
@@ -450,8 +552,6 @@ if ($sth->rows <= 0)
 	die "the SQL query returned no rows -- maybe you forgot to run ProcessCallGraphBuffers()?";
 }
 
-my $graph = undef;
-
 # Go through all the dot formatted lines one at a time.  Here we can assume that
 # the result set is ordered by GraphID, so we can write an entire file at once.
 #
@@ -460,8 +560,7 @@ my $graph = undef;
 #
 
 my $graphs = {};
-my $pipe;
-while (1)
+for (my $graph = undef, my $pipe;;)
 {
 	my $row = $sth->fetchrow_hashref;
 
@@ -493,10 +592,10 @@ while (1)
 		}
 
 		$graphs->{$graph} = { size => 0,
-							  name => "graph $graph",
 							  totalcalls => 0,
 							  totaltime => 0,
 							  avgtime => 0,
+							  entryfunctionname => 'unknown',
 							  firstcall => 'unknown',
 							  lastcall => 'unknown' };
 
@@ -539,7 +638,7 @@ $sth->execute();
 
 while (my $row = $sth->fetchrow_hashref)
 {
-	$graph = $row->{'graphid'};
+	my $graph = $row->{'graphid'};
 
 	# We skip graphs that have nothing more than the top level function, so
 	# this is not an error condition.
@@ -549,6 +648,10 @@ while (my $row = $sth->fetchrow_hashref)
 	$graphs->{$graph}->{'totaltime'} = $row->{'totaltime'};
 	$graphs->{$graph}->{'avgtime'} = $row->{'avgtime'};
 	$graphs->{$graph}->{'entryfunctionname'} = $row->{'entryfunctionname'};
+	$graphs->{$graph}->{'entryfunctionoid'} = $row->{'entryfunctionoid'};
+	$graphs->{$graph}->{'issubgraph'} = $row->{'issubgraph'};
+	$graphs->{$graph}->{'parentgraphentryfunctionoid'} = $row->{'parentgraphentryfunctionoid'};
+	$graphs->{$graph}->{'parentgraphentryfunctionname'} = $row->{'parentgraphentryfuntionname'};
 
 	# use the default value set previously if the values are not known
 	$graphs->{$graph}->{'firstcall'} = $row->{'firstcall'} if defined $row->{'firstcall'};
@@ -560,65 +663,25 @@ $dbh->disconnect();
 $dbh = undef;
 
 
+# Create a list of subgraphs, but only include the ones with calls > 0
+my $subgraphs = {};
+foreach my $graphid (keys %{$graphs})
+{
+	my $graph = $graphs->{$graphid};
+	next if (!$graph->{issubgraph});	
+	next if ($graph->{totalcalls} == 0);
+
+	my $parent = $graph->{parentgraphentryfunctionoid};
+	$subgraphs->{$parent} = [] if (!exists $subgraphs->{$parent});
+	
+	push @{$subgraphs->{$parent}}, $graphid;
+}
+
 # Generate the HTML index
 
-open(HTML, '>', $htmlfile) or die "could not open $htmlfile";
-print HTML "<!DOCTYPE html>\n";
-print HTML "<html>\n";
-print HTML "<head><title>graphs</title></head>\n";
-print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">\n";
+generate_html_index("$graphdir/index.html", $graphs, $subgraphs, $table_usage_graphs);
 
-my $i = 0;
-
-# Order the graphs based on complexity; more complex graphs first
-foreach my $key (sort { $graphs->{$b}->{size} <=> $graphs->{$a}->{size} } keys %{$graphs})
+foreach my $subgraph_parent (keys %{$subgraphs})
 {
-	my $value = $graphs->{$key};
-
-	next if $value->{'totalcalls'} == 0;
-
-	print HTML "<tr>\n";
-	print HTML "<td rowspan=3><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
-	print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'}</font></td></tr>\n";
-	print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
-	print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
-
-	if ($params{GenerateTableUsageGraphs})
-	{
-		# if this is a top level function and not a subgraph, see if we have
-		# table usage information available
-		if ($key =~ /t([0-9]+)/ &&
-			exists $table_usage_graphs->{$1} &&
-			(my $ntables = scalar keys %{$table_usage_graphs->{$1}->{tables}}) > 0)
-		{
-			my $tables = $table_usage_graphs->{$1}->{tables};
-
-			print HTML "<tr><td colspan=5><table border=1 style=\"border: 1px solid lightgray; border-collapse: collapse\">\n";
-			print HTML "<tr><th>table</th><th>seq_scan</th><th>seq_tup_read</th><th>idx_scan</th><th>idx_tup_read</th>\n";
-			print HTML "<th>n_tup_ins</th><th>n_tup_upd</th><th>n_tup_del</th></tr>\n";
-			foreach my $tablekey (sort keys %{$tables})
-			{
-				my $table = $tables->{$tablekey};
-				print HTML "<tr><td>$table->{relname}</td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
-				print HTML "<td>$table->{idx_scan}</td><td>$table->{idx_tup_read}</td>\n";
-				print HTML "<td>$table->{n_tup_ins}</td><td>$table->{n_tup_upd}</td><td>$table->{n_tup_del}</td></tr>\n";
-			}
-			print HTML "</table><br /><a href=\"tableusage/tlf$1.svg\">view table information</a></td></tr>\n";
-		}
-		else
-		{
-			print HTML "<tr><td colspan=5>No table<br />information available</td></tr>\n";
-		}
-	}
-	else
-	{
-		print HTML "<tr><td colspan=5>&nbsp;</td></tr>\n";
-	}
-
-	print HTML "</tr>\n";
-
-	++$i;
+	generate_subgraph_html_index("$graphdir/$subgraph_parent.html", $graphs, $subgraph_parent, $table_usage_graphs);
 }
-print HTML "</tr></table>\n";
-print HTML "</html>\n";
-close(HTML);
