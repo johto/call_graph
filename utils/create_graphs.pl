@@ -19,7 +19,17 @@ sub generate_html_index_worker
 	open(HTML, '>', $htmlfile) or die "could not open $htmlfile";
 	print HTML "<!DOCTYPE html>\n";
 	print HTML "<html>\n";
-	print HTML "<head><title>graphs</title></head>\n";
+	if (defined $subgraph_parent)
+	{
+		my $parent_graphid = 't'.$subgraph_parent;
+		my $parent_name = $graphs->{$parent_graphid}->{entryfunctionname};
+		print HTML "<head><title>Subgraphs for $parent_name</title></head>\n";
+	}
+	else
+	{
+		print HTML "<head><title>Call graphs</title></head>\n";
+	}
+
 	print HTML "<table border=\"1\" style=\"border: 1px solid gray; border-collapse: collapse\">\n";
 
 	# Order the graphs based on complexity; more complex graphs first
