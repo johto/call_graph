@@ -165,12 +165,15 @@ LOOP
 		WHERE
 			CallGraphBufferID = ANY(_.CallGraphBufferIDs)
 		RETURNING
-			relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read
+			relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read,
+				   n_tup_ins, n_tup_upd, n_tup_del
 	),
 	GroupedBuffers AS (
 		SELECT
 			relid, sum(seq_scan) AS seq_scan, sum(seq_tup_read) AS seq_tup_read,
-				   sum(idx_scan) AS idx_scan, sum(idx_tup_read) AS idx_tup_read
+				   sum(idx_scan) AS idx_scan, sum(idx_tup_read) AS idx_tup_read,
+				   sum(n_tup_ins) AS n_tup_ins, sum(n_tup_upd) AS n_tup_upd,
+				   sum(n_tup_del) AS n_tup_del
 		FROM
 			Buffers
 		GROUP BY
@@ -183,7 +186,10 @@ LOOP
 			seq_scan = tu.seq_scan + buf.seq_scan,
 			seq_tup_read = tu.seq_tup_read + buf.seq_tup_read,
 			idx_scan = tu.idx_scan + buf.idx_scan,
-			idx_tup_read = tu.idx_tup_read + buf.idx_tup_read
+			idx_tup_read = tu.idx_tup_read + buf.idx_tup_read,
+			n_tup_ins = tu.n_tup_ins + buf.n_tup_ins,
+			n_tup_upd = tu.n_tup_upd + buf.n_tup_upd,
+			n_tup_del = tu.n_tup_del + buf.n_tup_del
 		FROM
 			GroupedBuffers buf
 		WHERE
@@ -191,9 +197,11 @@ LOOP
 			tu.relid = buf.relid
 	)
 	INSERT INTO
-		TableUsage (CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read)
+		TableUsage (CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read,
+										n_tup_ins, n_tup_upd, n_tup_del)
 	SELECT
-		_CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_Read
+		_CallGraphID, relid, seq_scan, seq_tup_read, idx_scan, idx_tup_read,
+							 n_tup_ins, n_tup_upd, n_tup_del
 	FROM
 		GroupedBuffers buf
 	WHERE
