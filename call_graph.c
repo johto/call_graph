@@ -144,7 +144,9 @@ TableStatSnapshot *get_table_stat_snapshot()
 	ctl.keysize = sizeof(TableStatHashKey);
 	ctl.entrysize = sizeof(TableStatHashElem);
 	ctl.hash = tag_hash;
-	snapshot->hash_table = hash_create("snapshot_hash_table", 32, &ctl, HASH_ELEM | HASH_FUNCTION);
+	/* use TopTransactionContext for the hash table */
+	ctl.hcxt = TopTransactionContext;
+	snapshot->hash_table = hash_create("snapshot_hash_table", 32, &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 	if (ret > 0)
 	{
 		SPITupleTable *tuptable;
@@ -347,8 +349,10 @@ static void create_edge_hash_table()
 	ctl.keysize = sizeof(EdgeHashKey);
 	ctl.entrysize = sizeof(EdgeHashElem);
 	ctl.hash = tag_hash;
+	/* use TopTransactionContext for the hash table */
+	ctl.hcxt = TopTransactionContext;
 
-	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl, HASH_ELEM | HASH_FUNCTION);
+	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
 }
 
 static void destroy_edge_hash_table()
