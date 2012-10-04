@@ -70,7 +70,7 @@ sub generate_html_index_worker
 				foreach my $tablekey (sort keys %{$tables})
 				{
 					my $table = $tables->{$tablekey};
-					print HTML "<tr><td>$table->{relname}</td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
+					print HTML "<tr><td><a href=\"tableusage/r$tablekey.svg\">$table->{relname}</a></td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
 					print HTML "<td>$table->{idx_scan}</td><td>$table->{idx_tup_read}</td>\n";
 					print HTML "<td>$table->{n_tup_ins}</td><td>$table->{n_tup_upd}</td><td>$table->{n_tup_del}</td></tr>\n";
 				}
