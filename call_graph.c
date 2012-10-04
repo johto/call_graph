@@ -12,6 +12,8 @@
 #include "utils/guc.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
+#include "utils/tqual.h"
+#include "utils/memutils.h"
 #include "storage/shmem.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
@@ -37,20 +39,45 @@ PG_MODULE_MAGIC;
 
 void		_PG_init(void);
 
-typedef struct hashkey {
+typedef struct {
 	Oid caller;
 	Oid callee;
-} HashKey;
+} EdgeHashKey;
 
-typedef struct hashelem {
-	HashKey key;
+typedef struct {
+	EdgeHashKey key;
 	int num_calls;
 	instr_time self_time;
 	instr_time total_time;
 
 	/* temporary variable to keep track of the total time */
 	instr_time total_time_start;
-} HashElem;
+} EdgeHashElem;
+
+
+typedef struct {
+	Oid relid;
+} TableStatHashKey;
+
+typedef struct {
+	TableStatHashKey key;
+
+	int64 seq_scan;
+	int64 seq_tup_read;
+
+	int64 idx_scan;
+	int64 idx_tup_fetch;
+
+	int64 n_tup_ins;
+	int64 n_tup_upd;
+	int64 n_tup_del;
+} TableStatHashElem;
+
+/* hash_table should be NULL if num_tables == 0 */
+typedef struct {
+	HTAB *hash_table;
+	int num_tables;
+} TableStatSnapshot;
 
 
 static bool enable_call_graph = false;
@@ -67,8 +94,241 @@ static Oid top_level_function_oid = InvalidOid;
 static bool tracking_current_graph = false;
 static int recursion_depth = 0;
 
+/*
+ * Table stat snapshot taken at top level function entry and freed at function
+ * exit.  Allows us to track table usage.
+ */
+static TableStatSnapshot *table_stat_snapshot;
+
 static instr_time current_self_time_start; /* we only need one variable to keep track of all self_times */
 
+static
+TableStatSnapshot *get_table_stat_snapshot()
+{
+	int ret;
+	SPIPlanPtr planptr;
+	HASHCTL ctl;
+	TableStatSnapshot *snapshot;
+
+	if ((ret = SPI_connect()) < 0)
+		elog(ERROR, "could not connect to the SPI: %d", ret);
+
+	planptr = SPI_prepare("SELECT																				"
+						  "   relid, seq_scan, seq_tup_read,													"
+						  /* idx_* columns might be NULL if there are no indexes on the table */
+						  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
+						  "   n_tup_ins, n_tup_upd, n_tup_del													"
+						  "FROM																					"
+						  "   pg_stat_xact_user_tables															"
+						  "WHERE																				"
+						  "   relid <> 'call_graph.TableAccessBuffer'::regclass AND								"
+						  "   relid <> 'call_graph.CallGraphBuffer'::regclass AND								"
+						  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
+						  0, NULL);
+
+	if (!planptr)
+		elog(ERROR, "could not prepare an SPI plan");
+
+	ret = SPI_execp(planptr, NULL, NULL, 0);
+	if (ret < 0)
+		elog(ERROR, "SPI_execp() failed: %d", ret);
+
+	/*
+	 * We need to use TopTransactionContext explicitly for any allocations or else
+	 * our memory will disappear after we call SPI_finish().
+	 */
+	snapshot = MemoryContextAlloc(TopTransactionContext, sizeof(TableStatSnapshot));
+
+	/* create the hash table */
+	memset(&ctl, 0, sizeof(ctl));
+	ctl.keysize = sizeof(TableStatHashKey);
+	ctl.entrysize = sizeof(TableStatHashElem);
+	ctl.hash = tag_hash;
+	snapshot->hash_table = hash_create("snapshot_hash_table", 32, &ctl, HASH_ELEM | HASH_FUNCTION);
+	if (ret > 0)
+	{
+		SPITupleTable *tuptable;
+		TupleDesc tupdesc;
+		int i;
+		int proc;
+
+		tuptable = SPI_tuptable;
+		if (!tuptable)
+			elog(ERROR, "SPI_tuptable == NULL");
+		tupdesc = tuptable->tupdesc;
+
+		proc = SPI_processed;
+		for (i = 0; i < proc; ++i)
+		{
+			HeapTuple tuple = tuptable->vals[i];
+			bool isnull;
+			bool found;
+			TableStatHashKey key;
+			TableStatHashElem* elem;
+
+			key.relid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+			Assert(!isnull);
+
+			elem = hash_search(snapshot->hash_table, (void *) &key, HASH_ENTER, &found);
+			if (found)
+				elog(ERROR, "oops");
+			else
+			{
+				elem->key = key;
+
+				elem->seq_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 2, &found));
+				elem->seq_tup_read = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 3, &found));
+				elem->idx_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 4, &found));
+				elem->idx_tup_fetch = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 5, &found));
+				elem->n_tup_ins = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 6, &found));
+				elem->n_tup_upd = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 7, &found));
+				elem->n_tup_del = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 8, &found));
+			}
+		}
+
+		snapshot->num_tables = proc;
+	}
+
+	SPI_finish();
+
+	/* freeze the hash table; nobody's going to modify it anymore */
+	hash_freeze(snapshot->hash_table);
+
+	return snapshot;
+}
+
+static
+void insert_snapshot_delta(Datum callgraph_buffer_id, TableStatSnapshot *snapshot)
+{
+	int ret;
+	SPIPlanPtr planptr;
+
+	if ((ret = SPI_connect()) < 0)
+		elog(ERROR, "could not connect to the SPI: %d", ret);
+
+	planptr = SPI_prepare("SELECT																				"
+						  "   relid, seq_scan, seq_tup_read,													"
+						  /* idx_* columns might be NULL if there are no indexes on the table */
+						  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
+						  "   n_tup_ins, n_tup_upd, n_tup_del													"
+						  "FROM																					"
+						  "   pg_stat_xact_user_tables															"
+						  "WHERE																				"
+						  "   relid <> 'call_graph.TableAccessBuffer'::regclass AND								"
+						  "   relid <> 'call_graph.CallGraphBuffer'::regclass AND								"
+						  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
+						  0, NULL);
+
+	if (!planptr)
+		elog(ERROR, "could not prepare an SPI plan");
+
+	ret = SPI_execp(planptr, NULL, NULL, 0);
+	if (ret != SPI_OK_SELECT)
+		elog(ERROR, "SPI_execp() failed: %d", ret);
+
+	if (SPI_processed > 0)
+	{
+		SPITupleTable *tuptable;
+		SPIPlanPtr insertplanptr;
+		TupleDesc tupdesc;
+		int i;
+		int proc;
+
+		Oid argtypes[] = { INT8OID, OIDOID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, InvalidOid };
+		Datum args[9];
+
+		args[0] = callgraph_buffer_id;
+
+		tuptable = SPI_tuptable;
+		if (!tuptable)
+			elog(ERROR, "SPI_tuptable == NULL");
+		tupdesc = tuptable->tupdesc;
+
+		insertplanptr = SPI_prepare("INSERT INTO																			"
+									"   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,		"
+									"								  idx_scan, idx_tup_read,								"
+									"								  n_tup_ins, n_tup_upd, n_tup_del)						"
+									"		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)										",
+									9, argtypes);
+
+		if (!insertplanptr)
+			elog(ERROR, "could not prepare an SPI plan");
+
+		proc = SPI_processed;
+		for (i = 0; i < proc; ++i)
+		{
+			HeapTuple tuple = tuptable->vals[i];
+			bool isnull;
+			bool found;
+			Oid relid;
+			int64 seq_scan, seq_tup_read,
+				  idx_scan, idx_tup_fetch,
+				  n_tup_ins, n_tup_upd, n_tup_del;
+
+			relid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
+			Assert(!isnull);
+
+			seq_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 2, &isnull));
+			seq_tup_read = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 3, &isnull));
+			idx_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 4, &isnull));
+			idx_tup_fetch = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 5, &isnull));
+			n_tup_ins = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 6, &isnull));
+			n_tup_upd = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 7, &isnull));
+			n_tup_del = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 8, &isnull));			
+
+			/* If the snapshot isn't empty, calculate deltas */
+			if (snapshot->num_tables > 0)
+			{
+				TableStatHashKey key;
+				TableStatHashElem *elem;
+
+				key.relid = relid;
+
+				elem = hash_search(snapshot->hash_table, (void *) &key, HASH_FIND, &found);
+				if (found)
+				{
+					seq_scan -= elem->seq_scan;
+					seq_tup_read -= elem->seq_tup_read;
+					idx_scan -= elem->idx_scan;
+					idx_tup_fetch -= elem->idx_tup_fetch;
+					n_tup_ins -= elem->n_tup_ins;
+					n_tup_upd -= elem->n_tup_upd;
+					n_tup_del -= elem->n_tup_del;
+
+					/* If there was no change to the previous snapshot, skip this table */
+					if (seq_scan == 0 && idx_scan == 0 &&
+						n_tup_ins == 0 && n_tup_upd == 0 && n_tup_del == 0)
+						continue;
+				}
+			}
+
+			args[1] = ObjectIdGetDatum(relid);
+			args[2] = Int64GetDatum(seq_scan);
+			args[3] = Int64GetDatum(seq_tup_read);
+			args[4] = Int64GetDatum(idx_scan);
+			args[5] = Int64GetDatum(idx_tup_fetch);
+			args[6] = Int64GetDatum(n_tup_ins);
+			args[7] = Int64GetDatum(n_tup_upd);
+			args[8] = Int64GetDatum(n_tup_del);
+
+			if ((ret = SPI_execp(insertplanptr, args, NULL, 0)) != SPI_OK_INSERT)
+				elog(ERROR, "SPI_execp() failed: %d", ret);
+		}
+	}
+
+	SPI_finish();
+}
+
+static
+void release_table_stat_snapshot(TableStatSnapshot *snapshot)
+{
+	if (snapshot->hash_table)
+		hash_destroy(snapshot->hash_table);
+	else
+		Assert(snapshot->num_tables == 0);
+
+	pfree(snapshot);
+}
 
 static bool
 call_graph_needs_fmgr_hook(Oid functionId)
@@ -84,8 +344,8 @@ static void create_edge_hash_table()
 	Assert(edge_hash_table == NULL);
 
 	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(HashKey);
-	ctl.entrysize = sizeof(HashElem);
+	ctl.keysize = sizeof(EdgeHashKey);
+	ctl.entrysize = sizeof(EdgeHashElem);
 	ctl.hash = tag_hash;
 
 	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl, HASH_ELEM | HASH_FUNCTION);
@@ -99,7 +359,7 @@ static void destroy_edge_hash_table()
 	edge_hash_table = NULL;
 }
 
-static Datum get_session_identifier()
+static Datum assign_callgraph_buffer_id()
 {
 	List *names;
 	Oid seqoid;
@@ -110,11 +370,11 @@ static Datum get_session_identifier()
 	return DirectFunctionCall1(nextval_oid, ObjectIdGetDatum(seqoid));
 }
 
-static void process_edge_data()
+static void process_edge_data(Datum callgraph_buffer_id)
 {
 	int ret;
 	HASH_SEQ_STATUS hst;
-	HashElem *elem;
+	EdgeHashElem *elem;
 	SPIPlanPtr planptr;
 	Datum args[7];
 	Oid argtypes[] = { INT8OID, OIDOID, OIDOID, OIDOID, INT8OID, FLOAT8OID, FLOAT8OID, InvalidOid };
@@ -125,49 +385,6 @@ static void process_edge_data()
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
 
-
-	args[0] = get_session_identifier();
-
-	/* Track table usage before adding data to CallGraphBuffer to avoid it from appearing
-	 * in TableAccessBuffer. */
-	if (track_table_usage)
-	{
-		TimestampTz xact_start, stmt_start;
-
-		xact_start = GetCurrentTransactionStartTimestamp();
-		stmt_start = GetCurrentStatementStartTimestamp();
-
-		/* Only track usage if this was the first query in the transaction */
-		if (timestamp_cmp_internal(xact_start, stmt_start) == 0)
-		{
-			planptr = SPI_prepare("INSERT INTO																			"
-								  "   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,	"
-								  "									idx_scan, idx_tup_read,								"
-								  "									n_tup_ins, n_tup_upd, n_tup_del)					"
-								  "SELECT																				"
-								  "   $1, relid, seq_scan, seq_tup_read,												"
-								  /* idx_* columns might be NULL if there are no indexes on the table */
-								  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
-								  "   n_tup_ins, n_tup_upd, n_tup_del													"
-								  "FROM																					"
-								  "   pg_stat_xact_user_tables															"
-								  "WHERE																				"
-								  /* Exclude data for TableAccessBuffer; if we insert any rows before we get to the
-								   * TableAccessBuffer row, it will include the rows we inserted.  We do not want that. */
-								  "   relid <> 'call_graph.TableAccessBuffer'::regclass::oid AND						"
-								  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
-								  1, argtypes);
-
-			if (!planptr)
-				elog(ERROR, "could not prepare an SPI plan for the INSERT into TableAccessBuffer");
-
-			/* args[0] was set above */
-
-			if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
-				elog(ERROR, "SPI_execp() failed: %d", ret);
-		}
-	}
-
 	planptr = SPI_prepare("INSERT INTO 																				"
 						  "   call_graph.CallGraphBuffer (CallGraphBufferID, TopLevelFunction, Caller, Callee,		"
 						  "								  Calls, TotalTime, SelfTime)								"
@@ -176,7 +393,7 @@ static void process_edge_data()
 	if (!planptr)
 		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
 
-	/* args[0] was set above */
+	args[0] = callgraph_buffer_id;
 	args[1] = ObjectIdGetDatum(top_level_function_oid);
 
 	hash_seq_init(&hst, edge_hash_table);
@@ -200,8 +417,8 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			  FmgrInfo *flinfo, Datum *args)
 {
 	bool aborted = false;
-	HashKey key;
-	HashElem *elem;
+	EdgeHashKey key;
+	EdgeHashElem *elem;
 	instr_time current_time;
 
 	if (next_fmgr_hook)
@@ -230,6 +447,10 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 				/* Start tracking the call graph; we need to create the hash table */
 				create_edge_hash_table();
 				tracking_current_graph = true;
+
+				/* If we're tracking table usage, take a stat snapshot now */
+				if (track_table_usage)
+					table_stat_snapshot = get_table_stat_snapshot();
 
 				/* Use InvalidOid for the imaginary edge into the top level function */
 				key.caller = InvalidOid;
@@ -299,10 +520,11 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 						top_level_function_oid = InvalidOid;
 				}
 
+				Assert(table_stat_snapshot == NULL);
 				return;
 			}
 
-			Assert(((HashElem *) linitial(call_stack))->key.callee == flinfo->fn_oid);
+			Assert(((EdgeHashElem *) linitial(call_stack))->key.callee == flinfo->fn_oid);
 
 			elem = linitial(call_stack);
 			INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
@@ -312,7 +534,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 			if (call_stack != NIL)
 			{
-				/* we're back to the previous node, start recording its self_time */
+				/* we're going back to the previous node, start recording its self_time */
 				INSTR_TIME_SET_CURRENT(current_self_time_start);
 				break;
 			}
@@ -329,15 +551,33 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 				 */
 				PG_TRY();
 				{
-					process_edge_data();
+					Datum buffer_id = assign_callgraph_buffer_id();
+
+					/* Better check both conditions here */
+					if (table_stat_snapshot && track_table_usage)
+						insert_snapshot_delta(buffer_id, table_stat_snapshot);
+
+					process_edge_data(buffer_id);
 				}
 				PG_CATCH();
 				{
+					if (table_stat_snapshot)
+					{
+						release_table_stat_snapshot(table_stat_snapshot);
+						table_stat_snapshot = NULL;
+					}
+
 					destroy_edge_hash_table();
 					top_level_function_oid = InvalidOid;
 					PG_RE_THROW();
 				}
 				PG_END_TRY();
+			}
+
+			if (table_stat_snapshot)
+			{
+				release_table_stat_snapshot(table_stat_snapshot);
+				table_stat_snapshot = NULL;
 			}
 
 			destroy_edge_hash_table();
