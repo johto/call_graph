@@ -52,22 +52,22 @@ sub draw_tlfgraph
 	open(my $pipe, "| dot -Tsvg -o $graphdir/tlf$toplevelfunction.svg") or die "could not fork";
 
 	print $pipe "strict digraph $graph->{toplevelfunctionname} {\n";
-	print $pipe "rankdir = LR;\nnode [shape=record]\n";
+	print $pipe "rankdir = LR;\nnode [shape=rectangle]\n";
 
 	my $tables = $graph->{tables};
 	foreach my $table (keys %{$tables})
 	{
 		foreach my $referenced_table (@{$tables->{$table}->{confrelids}})
 		{
-			print $pipe "\"$table\":name -> \"$referenced_table\":name;\n";
+			print $pipe "\"$table\" -> \"$referenced_table\";\n";
 		}
 
 		my $tref = $tables->{$table};
-		print $pipe "\"$table\" [label=\"<name> $tref->{relname}|" .
-					"sequential scans: $tref->{seq_scan}|avg seq tuples: $tref->{seq_tup_read}|" .
-					"index scans: $tref->{idx_scan}|avg idx tuples: $tref->{idx_tup_read}|" .
-					"inserted rows: $tref->{n_tup_ins}|updated rows: $tref->{n_tup_upd}|" .
-					"deleted rows: $tref->{n_tup_del}\", href=\"r$table.svg\"]\n";
+
+		# read-only tables should be dashed
+		my $style = "dashed";
+		$style = "" if ($tref->{n_tup_ins} > 0 || $tref->{n_tup_upd} > 0 || $tref->{n_tup_del} > 0);
+		print $pipe "\"$table\" [label=\"$tref->{relname}\", href=\"r$table.svg\" style=\"$style\"]\n";
 	}
 
 	print $pipe "}\n";
