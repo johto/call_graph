@@ -12,6 +12,21 @@ require TableUsageGraphs;
 # of rendering graphs).
 my $dot_debug = 0;
 
+sub table_usage_sort
+{
+	my ($a, $b, $tables) = @_;
+
+	my $t;
+
+	$t = $tables->{$a};
+	my $arw = $t->{n_tup_ins} > 0 || $t->{n_tup_upd} > 0 || $t->{n_tup_del} > 0;
+	$t = $tables->{$b};
+	my $brw = $t->{n_tup_ins} > 0 || $t->{n_tup_upd} > 0 || $t->{n_tup_del} > 0;
+
+	# read-write first
+	return $brw <=> $arw || $a cmp $b;
+}
+
 sub generate_html_index_worker
 {
 	my ($htmlfile, $graphs, $subgraphs, $subgraph_parent, $table_usage_graphs) = @_;
@@ -51,7 +66,7 @@ sub generate_html_index_worker
 		}
 
 		print HTML "<tr>\n";
-		print HTML "<td rowspan=3><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
+		print HTML "<td rowspan=3 valign=\"top\"><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
 		print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'} $subgraph_information</font></td></tr>\n";
 		print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
 		print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
@@ -65,11 +80,23 @@ sub generate_html_index_worker
 				my $tables = $table_usage_graphs->{$value->{entryfunctionoid}}->{tables};
 
 				print HTML "<tr><td colspan=5><table border=1 style=\"border: 1px solid lightgray; border-collapse: collapse\">\n";
-				print HTML "<tr><th>table</th><th>seq_scan</th><th>seq_tup_read</th><th>idx_scan</th><th>idx_tup_read</th>\n";
-				print HTML "<th>n_tup_ins</th><th>n_tup_upd</th><th>n_tup_del</th></tr>\n";
-				foreach my $tablekey (sort keys %{$tables})
+
+				my $previousrw = undef;
+				foreach my $tablekey (sort { table_usage_sort($a, $b, $tables) } keys %{$tables})
 				{
 					my $table = $tables->{$tablekey};
+
+					my $currentrw = $table->{n_tup_ins} > 0 ||
+									$table->{n_tup_upd} > 0 ||
+									$table->{n_tup_del} > 0;
+					if (!defined $previousrw || $previousrw != $currentrw)
+					{
+						$previousrw = $currentrw;
+						my $label = $currentrw ? "read-write tables" : "read-only tables";
+						print HTML "<tr><th>$label</th><th>seq_scan</th><th>seq_tup_read</th><th>idx_scan</th><th>idx_tup_read</th>\n";
+						print HTML "<th>n_tup_ins</th><th>n_tup_upd</th><th>n_tup_del</th></tr>\n";
+					}
+
 					print HTML "<tr><td><a href=\"tableusage/r$tablekey.svg\">$table->{relname}</a></td><td>$table->{seq_scan}</td><td>$table->{seq_tup_read}</td>\n";
 					print HTML "<td>$table->{idx_scan}</td><td>$table->{idx_tup_read}</td>\n";
 					print HTML "<td>$table->{n_tup_ins}</td><td>$table->{n_tup_upd}</td><td>$table->{n_tup_del}</td></tr>\n";
