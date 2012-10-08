@@ -111,4 +111,4 @@ NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFuncti
 GeneratePerFunctionGraphs = yes
 
 ; Add clickable links to per-function graphs
-NodeHref = FunctionOid||'.svg'
+NodeHref = 'perfunction'/||FunctionOid||'.svg'
