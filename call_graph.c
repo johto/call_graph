@@ -369,7 +369,12 @@ static Datum assign_callgraph_buffer_id()
 	Oid seqoid;
 
 	names = stringToQualifiedNameList("call_graph.seqCallGraphBuffer");
+
+#if PG_VERSION_NUM >= 90200
+	seqoid = RangeVarGetRelid(makeRangeVarFromNameList(names), NoLock, false);
+#else
 	seqoid = RangeVarGetRelid(makeRangeVarFromNameList(names), false);
+#endif
 
 	return DirectFunctionCall1(nextval_oid, ObjectIdGetDatum(seqoid));
 }

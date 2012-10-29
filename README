@@ -1,6 +1,6 @@
-Call_Graph is a module for PostgreSQL 9.1 which automatically tracks function
-calls inside the database.  That information can then be used to create call
-graphs.
+Call_Graph is a module for PostgreSQL 9.1 and later which automatically tracks
+function calls inside the database.  That information can then be used to
+create call graphs.
 
 The module needs to be loaded when the PostgreSQL server starts so you should
 add 'call_graph' to your  shared_preload_libraries  in your postgresql.conf.
