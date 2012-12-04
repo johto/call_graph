@@ -78,8 +78,7 @@ n_tup_del bigint NOT NULL,
 PRIMARY KEY (CallGraphID, relid)
 );
 
--- replace ProcessCallGraphBuffers()
-CREATE OR REPLACE FUNCTION call_graph.ProcessCallGraphBuffers(_MaxBufferCount bigint)
+CREATE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
  RETURNS SETOF bigint
  LANGUAGE plpgsql
  SET search_path TO @extschema@
