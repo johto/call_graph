@@ -78,6 +78,28 @@ n_tup_del bigint NOT NULL,
 PRIMARY KEY (CallGraphID, relid)
 );
 
+CREATE TABLE DailyStats(
+CallGraphID bigserial NOT NULL,
+Date date NOT NULL,
+Calls bigint NOT NULL,
+TotalTime double precision NOT NULL,
+SelfTime double precision NOT NULL,
+FirstCall timestamptz NOT NULL,
+LastCall timestamptz NOT NULL,
+PRIMARY KEY (CallGraphID, Date)
+);
+
+CREATE TABLE HourlyStats(
+CallGraphID bigserial NOT NULL,
+DateStamp timestamptz NOT NULL CHECK (date_trunc('hour', DateStamp) = DateStamp),
+Calls bigint NOT NULL,
+TotalTime double precision NOT NULL,
+SelfTime double precision NOT NULL,
+FirstCall timestamptz NOT NULL,
+LastCall timestamptz NOT NULL,
+PRIMARY KEY (CallGraphID, DateStamp)
+);
+
 CREATE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
  RETURNS SETOF bigint
  LANGUAGE plpgsql
