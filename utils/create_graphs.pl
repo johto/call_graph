@@ -66,10 +66,34 @@ sub generate_html_index_worker
 		}
 
 		print HTML "<tr>\n";
-		print HTML "<td rowspan=3 valign=\"top\"><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
+		print HTML "<td rowspan=6 valign=\"top\"><a href=\"$key.svg\"><img width=\"500\" height=\"320\" src=\"".$key.".svg\" /></a></td>\n";
 		print HTML "<td colspan=5><font size=\"+2\">$value->{'entryfunctionname'} $subgraph_information</font></td></tr>\n";
 		print HTML "<tr><td>$value->{'totalcalls'} calls</td><td>$value->{'totaltime'} ms total</td><td>$value->{'avgtime'} ms average</td>\n";
 		print HTML "<td>First call<br />$value->{'firstcall'}</td><td>Last call<br />$value->{'lastcall'}</td></tr>\n";
+
+		if (defined $value->{callstoday} && $value->{callstoday} > 0)
+		{
+			print HTML "<tr><td>Today:</td><td>$value->{'callstoday'} calls</td><td>$value->{'avgtimetoday'} ms average</td>\n";
+			print HTML "<td>First call<br />$value->{'firstcalltoday'}</td><td>Last call<br />$value->{'lastcalltoday'}</td></tr>\n";
+		}
+		else
+			{ print HTML "<tr><td colspan=6>No calls today</td></tr>"; }
+
+		if (defined $value->{callscurrenthour} && $value->{callscurrenthour} > 0)
+		{
+			print HTML "<tr><td>Current Hour:</td><td>$value->{'callscurrenthour'} calls</td><td>$value->{'avgtimecurrenthour'} ms average</td>\n";
+			print HTML "<td>First call<br />$value->{'firstcallcurrenthour'}</td><td>Last call<br />$value->{'lastcallcurrenthour'}</td></tr>\n";
+		}
+		else
+			{ print HTML "<tr><td colspan=6>No calls in the current hour</td></tr>"; }
+
+		if (defined $value->{callsprevioushour} && $value->{callsprevioushour} > 0)
+		{
+			print HTML "<tr><td>Previous Hour:</td><td>$value->{'callsprevioushour'} calls</td><td>$value->{'avgtimeprevioushour'} ms average</td>\n";
+			print HTML "<td>First call<br />$value->{'firstcallprevioushour'}</td><td>Last call<br />$value->{'lastcallprevioushour'}</td></tr>\n";
+		}
+		else
+			{ print HTML "<tr><td colspan=6>No calls in the previous hour</td></tr>"; }
 
 		if (defined $table_usage_graphs)
 		{
@@ -499,7 +523,16 @@ SELECT
 	GraphID, EntryFunctionOid, EntryFunctionName, IsSubGraph,
 	ParentGraphEntryFunctionOid, ParentGraphEntryFunctionName,
 	to_char(FirstCall, 'YYYY-MM-DD HH24:MI:SS') AS FirstCall,
-	to_char(LastCall, 'YYYY-MM-DD HH24:MI:SS') AS LastCall, TotalCalls, TotalTime, AvgTime
+	to_char(LastCall, 'YYYY-MM-DD HH24:MI:SS') AS LastCall, TotalCalls, TotalTime, AvgTime,
+	CallsToday, round(TotalTimeToday::numeric / CallsToday::numeric, 2) AS AvgTimeToday,
+	to_char(FirstCallToday, 'YYYY-MM-DD HH24:MI:SS') AS FirstCallToday,
+	to_char(LastCallToday, 'YYYY-MM-DD HH24:MI:SS') AS LastCallToday,
+	CallsCurrentHour, round(TotalTimeCurrentHour::numeric / CallsCurrentHour::numeric, 2) AS AvgTimeCurrentHour,
+	to_char(FirstCallCurrentHour, 'YYYY-MM-DD HH24:MI:SS') AS FirstCallCurrentHour,
+	to_char(LastCallCurrentHour, 'YYYY-MM-DD HH24:MI:SS') AS LastCallCurrentHour,
+	CallsPreviousHour, round(TotalTimePreviousHour::numeric / CallsPreviousHour::numeric, 2) AS AvgTimePreviousHour,
+	to_char(FirstCallPreviousHour, 'YYYY-MM-DD HH24:MI:SS') AS FirstCallPreviousHour,
+	to_char(LastCallPreviousHour, 'YYYY-MM-DD HH24:MI:SS') AS LastCallPreviousHour
 FROM
 (
 	SELECT
@@ -553,6 +586,58 @@ FROM
 		IsSubGraph, ParentGraphEntryFunctionOid,
 		ParentGraphEntryFunctionName
 ) ss
+LEFT JOIN
+(
+	SELECT
+		cg.TopLevelFunction,
+		sum(CallsToday) AS CallsToday,
+		sum(TotalTimeToday) AS TotalTimeToday,
+		min(FirstCallToday) AS FirstCallToday, max(LastCallToday) AS LastCallToday,
+
+		sum(CallsCurrentHour) AS CallsCurrentHour,
+		sum(TotalTimeCurrentHour) AS TotalTimeCurrentHour,
+		min(FirstCallCurrentHour) AS FirstCallCurrentHour, max(LastCallCurrentHour) AS LastCallCurrentHour,
+
+		sum(CallsPreviousHour) AS CallsPreviousHour,
+		sum(TotalTimePreviousHour) AS TotalTimePreviousHour,
+		min(FirstCallPreviousHour) AS FirstCallPreviousHour, max(LastCallPreviousHour) AS LastCallPreviousHour
+	FROM
+	(
+		SELECT
+			Daily.CallGraphID,
+			-- There will only be duplicate values of Daily.* for any single row, so
+			-- the choice of aggregate doesn't matter here; I chose min().  Note that
+			-- we explicitly do NOT want to sum() anything.
+			min(Daily.Calls) AS CallsToday,
+			min(Daily.TotalTime) AS TotalTimeToday,
+			min(Daily.FirstCall) AS FirstCallToday, min(Daily.LastCall) AS LastCallToday,
+			sum(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.Calls END) AS CallsCurrentHour,
+			sum(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.TotalTime END) AS TotalTimeCurrentHour,
+			min(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.FirstCall END) AS FirstCallCurrentHour,
+			max(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.LastCall END) AS LastCallCurrentHour,
+	
+			sum(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.Calls END) AS CallsPreviousHour,
+			sum(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.TotalTime END) AS TotalTimePreviousHour,
+			min(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.FirstCall END) AS FirstCallPreviousHour,
+			max(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.LastCall END) AS LastCallPreviousHour
+		FROM
+			call_graph.dailystats Daily
+		LEFT JOIN
+			call_graph.HourlyStats Hourly
+				ON (Hourly.CallGraphID = Daily.CallGraphID AND
+					Hourly.DateStamp >= date_trunc('hour', now() - interval '1 hour'))
+		WHERE
+			Daily.Date = current_date
+		GROUP BY
+			Daily.CallGraphID
+	) ss
+	JOIN
+		call_graph.callgraphs cg
+			ON (ss.CallGraphID = cg.CallGraphID)
+	GROUP BY
+		cg.TopLevelFunction
+) Stats
+	ON (Stats.TopLevelFunction = EntryFunctionOid)
 SQL
 ;
 
@@ -680,6 +765,21 @@ while (my $row = $sth->fetchrow_hashref)
 	# We skip graphs that have nothing more than the top level function, so
 	# this is not an error condition.
 	next if (!defined $graphs->{$graph});
+
+	$graphs->{$graph}->{callstoday} = $row->{callstoday};
+	$graphs->{$graph}->{avgtimetoday} = $row->{avgtimetoday};
+	$graphs->{$graph}->{firstcalltoday} = $row->{firstcalltoday};
+	$graphs->{$graph}->{lastcalltoday} = $row->{lastcalltoday};
+
+	$graphs->{$graph}->{callscurrenthour} = $row->{callscurrenthour};
+	$graphs->{$graph}->{avgtimecurrenthour} = $row->{avgtimecurrenthour};
+	$graphs->{$graph}->{firstcallcurrenthour} = $row->{firstcallcurrenthour};
+	$graphs->{$graph}->{lastcallcurrenthour} = $row->{lastcallcurrenthour};
+
+	$graphs->{$graph}->{callsprevioushour} = $row->{callsprevioushour};
+	$graphs->{$graph}->{avgtimeprevioushour} = $row->{avgtimeprevioushour};
+	$graphs->{$graph}->{firstcallprevioushour} = $row->{firstcallprevioushour};
+	$graphs->{$graph}->{lastcallprevioushour} = $row->{lastcallprevioushour};
 
 	$graphs->{$graph}->{'totalcalls'} = $row->{'totalcalls'};
 	$graphs->{$graph}->{'totaltime'} = $row->{'totaltime'};

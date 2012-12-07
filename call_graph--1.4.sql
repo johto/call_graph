@@ -1,11 +1,11 @@
-/* call_graph/call_graph--1.3.sql */
+/* call_graph/call_graph--1.4.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION call_graph" to load this file. \quit
 
 GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
 
-CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.3'; $$ LANGUAGE sql;
+CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.4'; $$ LANGUAGE sql;
 
 CREATE SEQUENCE seqCallGraphBuffer;
 CREATE UNLOGGED TABLE CallGraphBuffer(
@@ -146,7 +146,8 @@ LOOP
         Calls     = Calls     + _.Calls,
         TotalTime = TotalTime + _.TotalTime,
         SelfTime  = SelfTime  + _.SelfTime,
-        LastCall  = _.LatestCall
+		FirstCall = LEAST(FirstCall, _.FirstCall),
+        LastCall  = GREATEST(LastCall, _.LatestCall)
     WHERE TopLevelFunction = _.TopLevelFunction
     AND EdgesHash          = _.EdgesHash
     RETURNING CallGraphID INTO _CallGraphID;

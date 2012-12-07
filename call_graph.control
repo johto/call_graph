@@ -1,5 +1,5 @@
 comment = 'automatically track function calls to create call graphs'
-default_version = '1.3'
+default_version = '1.4'
 
 relocatable = false
 schema = 'call_graph'
