@@ -554,7 +554,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			 */
 			if (!aborted)
 			{
-				/* temporarily disable call graph to allow triggers on the target table */
+				/* temporarily disable call graph to allow triggers on the target tables */
 				bool save_enable_call_graph = enable_call_graph;
 				enable_call_graph = false;
 
