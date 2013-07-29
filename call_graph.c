@@ -387,7 +387,6 @@ static void process_edge_data(Datum callgraph_buffer_id)
 	SPIPlanPtr planptr;
 	Datum args[7];
 	Oid argtypes[] = { INT8OID, OIDOID, OIDOID, OIDOID, INT8OID, FLOAT8OID, FLOAT8OID, InvalidOid };
-	bool save_enable_call_graph;
 
 	/* Start by freezing the hash table.  This saves us some trouble. */
 	hash_freeze(edge_hash_table);
@@ -406,10 +405,6 @@ static void process_edge_data(Datum callgraph_buffer_id)
 	args[0] = callgraph_buffer_id;
 	args[1] = ObjectIdGetDatum(top_level_function_oid);
 
-	/* temporarily disable call graph to allow triggers on the target table */
-	save_enable_call_graph = enable_call_graph;
-	enable_call_graph = false;
-
 	hash_seq_init(&hst, edge_hash_table);
 	while ((elem = hash_seq_search(&hst)) != NULL)
 	{
@@ -420,12 +415,8 @@ static void process_edge_data(Datum callgraph_buffer_id)
 		args[6] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(elem->self_time));
 
 		if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
-		{
-			enable_call_graph = save_enable_call_graph;
 			elog(ERROR, "SPI_execp() failed: %d", ret);
-		}
 	}
-	enable_call_graph = save_enable_call_graph;
 
 	SPI_finish();
 }
@@ -563,6 +554,10 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 			 */
 			if (!aborted)
 			{
+				/* temporarily disable call graph to allow triggers on the target table */
+				bool save_enable_call_graph = enable_call_graph;
+				enable_call_graph = false;
+
 				/*
 				 * It is in some cases possible that process_edge_data() throws an exception.  We really need to
 				 * clean up our state in case that happens.
@@ -576,6 +571,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 						insert_snapshot_delta(buffer_id, table_stat_snapshot);
 
 					process_edge_data(buffer_id);
+					enable_call_graph = save_enable_call_graph;
 				}
 				PG_CATCH();
 				{
@@ -585,6 +581,7 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 						table_stat_snapshot = NULL;
 					}
 
+					enable_call_graph = save_enable_call_graph;
 					destroy_edge_hash_table();
 					top_level_function_oid = InvalidOid;
 					PG_RE_THROW();
