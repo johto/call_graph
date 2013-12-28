@@ -1,21 +1,25 @@
-/* -------------------------------------------------------------------------
- *
+/*
  * call_graph.c
- *
- * -------------------------------------------------------------------------
+ *   Implementation of the hooks necessary to make call_graph work.
  */
 #include "postgres.h"
 
-#include "port.h"
 #include "fmgr.h"
+#include "funcapi.h"
+#include "miscadmin.h"
+#include "port.h"
+#include "access/hash.h"
 #include "access/xact.h"
 #include "utils/guc.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
-#include "utils/tqual.h"
 #include "utils/memutils.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
+#include "utils/tqual.h"
 #include "storage/shmem.h"
 #include "catalog/pg_type.h"
+#include "catalog/pg_proc.h"
 #include "catalog/namespace.h"
 #include "commands/sequence.h"
 #include "executor/spi.h"
@@ -31,17 +35,20 @@
  *
  * Because of the fact that we might get enabled in the middle of a call graph,
  * we can't simply stop tracking when the module is disabled.  However, there's
- * no need to keep track of the full call stack; just track how many times we've
- * recursed into the top level function.
+ * no need to keep track of the full call stack; just track how many times
+ * we've recursed into the top level function.
  */
 
 PG_MODULE_MAGIC;
 
-void		_PG_init(void);
+void _PG_init(void);
 
 typedef struct {
-	Oid caller;
-	Oid callee;
+	char *caller_nspname;
+	char *caller_signature;
+
+	char *callee_nspname;
+	char *callee_signature;
 } EdgeHashKey;
 
 typedef struct {
@@ -55,291 +62,147 @@ typedef struct {
 } EdgeHashElem;
 
 
-typedef struct {
-	Oid relid;
-} TableStatHashKey;
-
-typedef struct {
-	TableStatHashKey key;
-
-	int64 seq_scan;
-	int64 seq_tup_read;
-
-	int64 idx_scan;
-	int64 idx_tup_fetch;
-
-	int64 n_tup_ins;
-	int64 n_tup_upd;
-	int64 n_tup_del;
-} TableStatHashElem;
-
-/* hash_table should be NULL if num_tables == 0 */
-typedef struct {
-	HTAB *hash_table;
-	int num_tables;
-} TableStatSnapshot;
-
-
 static bool enable_call_graph = false;
-static bool track_table_usage = false;
 
 static needs_fmgr_hook_type next_needs_fmgr_hook = NULL;
 static fmgr_hook_type next_fmgr_hook = NULL;
 
+/*
+ * Our own memory context.  All per-graph memory we allocate should be
+ * allocated in this context.  The context will be reset any time the call
+ * stack is completely unwound (see cg_release_graph_state) to make sure we
+ * never leak memory.
+ */
+static MemoryContext cg_memory_ctx = NULL;
+
 static HTAB *edge_hash_table = NULL;
 
 static List *call_stack = NULL;
-static Oid top_level_function_oid = InvalidOid;
+static Oid top_level_function_oid = -1;
 
 static bool tracking_current_graph = false;
 static int recursion_depth = 0;
 
-/*
- * Table stat snapshot taken at top level function entry and freed at function
- * exit.  Allows us to track table usage.
- */
-static TableStatSnapshot *table_stat_snapshot;
-
 static instr_time current_self_time_start; /* we only need one variable to keep track of all self_times */
 
-static
-TableStatSnapshot *get_table_stat_snapshot()
-{
-	int ret;
-	SPIPlanPtr planptr;
-	HASHCTL ctl;
-	TableStatSnapshot *snapshot;
 
-	if ((ret = SPI_connect()) < 0)
-		elog(ERROR, "could not connect to the SPI: %d", ret);
+static void cg_lookup_function(Oid fnoid, char **nspname, char **signature);
+static void cg_enter_function(Oid fnoid, instr_time current_time);
+static bool cg_needs_fmgr_hook(Oid functionId);
+static void cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args);
+static void cg_create_edge_hash_table();
+static void cg_destroy_edge_hash_table();
+static void cg_release_graph_state();
+static Datum cg_assign_callgraph_buffer_id();
+static void cg_process_edge_data(Datum callgraph_buffer_id);
 
-	planptr = SPI_prepare("SELECT																				"
-						  "   relid, seq_scan, seq_tup_read,													"
-						  /* idx_* columns might be NULL if there are no indexes on the table */
-						  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
-						  "   n_tup_ins, n_tup_upd, n_tup_del													"
-						  "FROM																					"
-						  "   pg_stat_xact_user_tables															"
-						  "WHERE																				"
-						  "   relid <> 'call_graph.TableAccessBuffer'::regclass AND								"
-						  "   relid <> 'call_graph.CallGraphBuffer'::regclass AND								"
-						  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
-						  0, NULL);
 
-	if (!planptr)
-		elog(ERROR, "could not prepare an SPI plan");
 
-	ret = SPI_execp(planptr, NULL, NULL, 0);
-	if (ret < 0)
-		elog(ERROR, "SPI_execp() failed: %d", ret);
+/* hash funcs */
+static uint32 cg_hash_fn(const void *key, Size keysize);
+static int cg_cmp(const char *v1, const char *v2);
+static int cg_hash_match_fn(const void *key1, const void *key2, Size keysize);
 
-	/*
-	 * We need to use TopTransactionContext explicitly for any allocations or else
-	 * our memory will disappear after we call SPI_finish().
-	 */
-	snapshot = MemoryContextAlloc(TopTransactionContext, sizeof(TableStatSnapshot));
 
-	/* create the hash table */
-	memset(&ctl, 0, sizeof(ctl));
-	ctl.keysize = sizeof(TableStatHashKey);
-	ctl.entrysize = sizeof(TableStatHashElem);
-	ctl.hash = tag_hash;
-	/* use TopTransactionContext for the hash table */
-	ctl.hcxt = TopTransactionContext;
-	snapshot->hash_table = hash_create("snapshot_hash_table", 32, &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
-	if (ret > 0)
-	{
-		SPITupleTable *tuptable;
-		TupleDesc tupdesc;
-		int i;
-		int proc;
-
-		tuptable = SPI_tuptable;
-		if (!tuptable)
-			elog(ERROR, "SPI_tuptable == NULL");
-		tupdesc = tuptable->tupdesc;
-
-		proc = SPI_processed;
-		for (i = 0; i < proc; ++i)
-		{
-			HeapTuple tuple = tuptable->vals[i];
-			bool isnull;
-			bool found;
-			TableStatHashKey key;
-			TableStatHashElem* elem;
-
-			key.relid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
-			Assert(!isnull);
-
-			elem = hash_search(snapshot->hash_table, (void *) &key, HASH_ENTER, &found);
-			if (found)
-				elog(ERROR, "oops");
-			else
-			{
-				elem->key = key;
-
-				elem->seq_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 2, &found));
-				elem->seq_tup_read = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 3, &found));
-				elem->idx_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 4, &found));
-				elem->idx_tup_fetch = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 5, &found));
-				elem->n_tup_ins = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 6, &found));
-				elem->n_tup_upd = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 7, &found));
-				elem->n_tup_del = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 8, &found));
-			}
-		}
-
-		snapshot->num_tables = proc;
-	}
-
-	SPI_finish();
-
-	/* freeze the hash table; nobody's going to modify it anymore */
-	hash_freeze(snapshot->hash_table);
-
-	return snapshot;
-}
-
-static
-void insert_snapshot_delta(Datum callgraph_buffer_id, TableStatSnapshot *snapshot)
-{
-	int ret;
-	SPIPlanPtr planptr;
-
-	if ((ret = SPI_connect()) < 0)
-		elog(ERROR, "could not connect to the SPI: %d", ret);
-
-	planptr = SPI_prepare("SELECT																				"
-						  "   relid, seq_scan, seq_tup_read,													"
-						  /* idx_* columns might be NULL if there are no indexes on the table */
-						  "	  COALESCE(idx_scan, 0), COALESCE(idx_tup_fetch, 0),								"
-						  "   n_tup_ins, n_tup_upd, n_tup_del													"
-						  "FROM																					"
-						  "   pg_stat_xact_user_tables															"
-						  "WHERE																				"
-						  "   relid <> 'call_graph.TableAccessBuffer'::regclass AND								"
-						  "   relid <> 'call_graph.CallGraphBuffer'::regclass AND								"
-						  "   GREATEST(seq_scan, idx_scan, n_tup_ins, n_tup_upd, n_tup_del) > 0					",
-						  0, NULL);
-
-	if (!planptr)
-		elog(ERROR, "could not prepare an SPI plan");
-
-	ret = SPI_execp(planptr, NULL, NULL, 0);
-	if (ret != SPI_OK_SELECT)
-		elog(ERROR, "SPI_execp() failed: %d", ret);
-
-	if (SPI_processed > 0)
-	{
-		SPITupleTable *tuptable;
-		SPIPlanPtr insertplanptr;
-		TupleDesc tupdesc;
-		int i;
-		int proc;
-
-		Oid argtypes[] = { INT8OID, OIDOID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, INT8OID, InvalidOid };
-		Datum args[9];
-
-		args[0] = callgraph_buffer_id;
-
-		tuptable = SPI_tuptable;
-		if (!tuptable)
-			elog(ERROR, "SPI_tuptable == NULL");
-		tupdesc = tuptable->tupdesc;
-
-		insertplanptr = SPI_prepare("INSERT INTO																			"
-									"   call_graph.TableAccessBuffer (CallGraphBufferID, relid, seq_scan, seq_tup_read,		"
-									"								  idx_scan, idx_tup_read,								"
-									"								  n_tup_ins, n_tup_upd, n_tup_del)						"
-									"		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)										",
-									9, argtypes);
-
-		if (!insertplanptr)
-			elog(ERROR, "could not prepare an SPI plan");
-
-		proc = SPI_processed;
-		for (i = 0; i < proc; ++i)
-		{
-			HeapTuple tuple = tuptable->vals[i];
-			bool isnull;
-			bool found;
-			Oid relid;
-			int64 seq_scan, seq_tup_read,
-				  idx_scan, idx_tup_fetch,
-				  n_tup_ins, n_tup_upd, n_tup_del;
-
-			relid = DatumGetObjectId(SPI_getbinval(tuple, tupdesc, 1, &isnull));
-			Assert(!isnull);
-
-			seq_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 2, &isnull));
-			seq_tup_read = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 3, &isnull));
-			idx_scan = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 4, &isnull));
-			idx_tup_fetch = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 5, &isnull));
-			n_tup_ins = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 6, &isnull));
-			n_tup_upd = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 7, &isnull));
-			n_tup_del = DatumGetInt64(SPI_getbinval(tuple, tupdesc, 8, &isnull));			
-
-			/* If the snapshot isn't empty, calculate deltas */
-			if (snapshot->num_tables > 0)
-			{
-				TableStatHashKey key;
-				TableStatHashElem *elem;
-
-				key.relid = relid;
-
-				elem = hash_search(snapshot->hash_table, (void *) &key, HASH_FIND, &found);
-				if (found)
-				{
-					seq_scan -= elem->seq_scan;
-					seq_tup_read -= elem->seq_tup_read;
-					idx_scan -= elem->idx_scan;
-					idx_tup_fetch -= elem->idx_tup_fetch;
-					n_tup_ins -= elem->n_tup_ins;
-					n_tup_upd -= elem->n_tup_upd;
-					n_tup_del -= elem->n_tup_del;
-
-					/* If there was no change to the previous snapshot, skip this table */
-					if (seq_scan == 0 && idx_scan == 0 &&
-						n_tup_ins == 0 && n_tup_upd == 0 && n_tup_del == 0)
-						continue;
-				}
-			}
-
-			args[1] = ObjectIdGetDatum(relid);
-			args[2] = Int64GetDatum(seq_scan);
-			args[3] = Int64GetDatum(seq_tup_read);
-			args[4] = Int64GetDatum(idx_scan);
-			args[5] = Int64GetDatum(idx_tup_fetch);
-			args[6] = Int64GetDatum(n_tup_ins);
-			args[7] = Int64GetDatum(n_tup_upd);
-			args[8] = Int64GetDatum(n_tup_del);
-
-			if ((ret = SPI_execp(insertplanptr, args, NULL, 0)) != SPI_OK_INSERT)
-				elog(ERROR, "SPI_execp() failed: %d", ret);
-		}
-	}
-
-	SPI_finish();
-}
-
-static
-void release_table_stat_snapshot(TableStatSnapshot *snapshot)
-{
-	if (snapshot->hash_table)
-		hash_destroy(snapshot->hash_table);
-	else
-		Assert(snapshot->num_tables == 0);
-
-	pfree(snapshot);
-}
 
 static bool
-call_graph_needs_fmgr_hook(Oid functionId)
+cg_needs_fmgr_hook(Oid functionId)
 {
 	/* our hook needs to always be called to keep track of the call stack */
 	return true;
 }
 
-static void create_edge_hash_table()
+/*
+ * Release any per-graph state we have: release memory allocated in our memory
+ * context, destroy the edge hash table and reset some globals.
+ */
+static void
+cg_release_graph_state()
+{
+	Assert(call_stack == NIL);
+
+	cg_destroy_edge_hash_table();
+	top_level_function_oid = InvalidOid;
+	tracking_current_graph = false;
+
+	MemoryContextReset(cg_memory_ctx);
+}
+
+static uint32
+cg_hash_fn(const void *key, Size keysize)
+{
+	EdgeHashKey *edge;
+	uint32 h;
+
+	Assert(keysize == sizeof(EdgeHashKey));
+
+	edge = (EdgeHashKey *) key;
+	h = 0;
+	if (edge->caller_nspname != NULL)
+	{
+		Assert(edge->caller_signature != NULL);
+		h ^= DatumGetUInt32(hash_any((const unsigned char *) edge->caller_nspname,
+									 strlen(edge->caller_nspname)));
+		h ^= DatumGetUInt32(hash_any((const unsigned char *) edge->caller_signature,
+									 strlen(edge->caller_signature)));
+	}
+	Assert(edge->callee_nspname != NULL);
+	Assert(edge->callee_signature != NULL);
+	h ^= DatumGetUInt32(hash_any((const unsigned char *) edge->callee_nspname,
+								 strlen(edge->callee_nspname)));
+	h ^= DatumGetUInt32(hash_any((const unsigned char *) edge->callee_signature,
+								 strlen(edge->callee_signature)));
+
+	//return h;
+	return h ^ h;
+}
+
+/*
+ * Compare two strings for equality.  NULL pointer is considered smaller than
+ * any non-NULL string, and equal to another NULL pointer.
+ */
+static int
+cg_cmp(const char *v1, const char *v2)
+{
+	if (v1 == NULL && v2 != NULL)
+		return -1;
+	else if (v1 != NULL && v2 == NULL)
+		return 1;
+	else if (v1 == NULL && v2 == NULL)
+		return 0;
+	else
+		return strcmp(v1, v2);
+}
+
+static int
+cg_hash_match_fn(const void *key1, const void *key2, Size keysize)
+{
+	EdgeHashKey *edge1;
+	EdgeHashKey *edge2;
+	int cmp;
+
+	Assert(keysize == sizeof(EdgeHashKey));
+
+	edge1 = (EdgeHashKey *) key1;
+	edge2 = (EdgeHashKey *) key2;
+
+	elog(INFO, "%s %s %s %s", edge1->caller_nspname, edge1->caller_signature, edge2->caller_nspname, edge2->caller_signature);
+
+	cmp = cg_cmp(edge1->caller_nspname, edge2->caller_nspname);
+	if (cmp != 0)
+		return cmp;
+	cmp = cg_cmp(edge1->caller_signature, edge2->caller_signature);
+	if (cmp != 0)
+		return cmp;
+
+	cmp = cg_cmp(edge1->callee_nspname, edge2->callee_nspname);
+	if (cmp != 0)
+		return cmp;
+	return cg_cmp(edge1->callee_signature, edge2->callee_signature);
+}
+
+static void
+cg_create_edge_hash_table()
 {
 	HASHCTL ctl;
 
@@ -348,14 +211,17 @@ static void create_edge_hash_table()
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize = sizeof(EdgeHashKey);
 	ctl.entrysize = sizeof(EdgeHashElem);
-	ctl.hash = tag_hash;
-	/* use TopTransactionContext for the hash table */
-	ctl.hcxt = TopTransactionContext;
+	ctl.hash = cg_hash_fn;
+	ctl.match = cg_hash_match_fn;
+	/* use our memory context for the hash table */
+	ctl.hcxt = cg_memory_ctx;
 
-	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl, HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl,
+								  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
 }
 
-static void destroy_edge_hash_table()
+static void
+cg_destroy_edge_hash_table()
 {
 	Assert(edge_hash_table != NULL);
 
@@ -363,7 +229,8 @@ static void destroy_edge_hash_table()
 	edge_hash_table = NULL;
 }
 
-static Datum assign_callgraph_buffer_id()
+static Datum
+cg_assign_callgraph_buffer_id()
 {
 	List *names;
 	Oid seqoid;
@@ -379,14 +246,18 @@ static Datum assign_callgraph_buffer_id()
 	return DirectFunctionCall1(nextval_oid, ObjectIdGetDatum(seqoid));
 }
 
-static void process_edge_data(Datum callgraph_buffer_id)
+static void
+cg_process_edge_data(Datum callgraph_buffer_id)
 {
 	int ret;
 	HASH_SEQ_STATUS hst;
 	EdgeHashElem *elem;
 	SPIPlanPtr planptr;
-	Datum args[7];
-	Oid argtypes[] = { INT8OID, OIDOID, OIDOID, OIDOID, INT8OID, FLOAT8OID, FLOAT8OID, InvalidOid };
+	Datum args[8];
+	Oid argtypes[] = { INT8OID, TEXTOID, TEXTOID, TEXTOID, TEXTOID,
+					   INT8OID, FLOAT8OID, FLOAT8OID, InvalidOid };
+	char nulls[8] = "        ";
+
 
 	/* Start by freezing the hash table.  This saves us some trouble. */
 	hash_freeze(edge_hash_table);
@@ -394,39 +265,194 @@ static void process_edge_data(Datum callgraph_buffer_id)
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
 
-	planptr = SPI_prepare("INSERT INTO 																				"
-						  "   call_graph.CallGraphBuffer (CallGraphBufferID, TopLevelFunction, Caller, Callee,		"
-						  "								  Calls, TotalTime, SelfTime)								"
-						  "   VALUES ($1, $2, $3, $4, $5, $6, $7)													",
-						  7, argtypes);
+	planptr = SPI_prepare("INSERT INTO                                 "
+						  "   call_graph.CallGraphBuffer               "
+ 						  "     (CallGraphBufferID,                    "
+ 						  "      CallerNspName, CallerSignature,       "
+ 						  "      CalleeNspName, CalleeSignature,       "
+ 						  "      Calls, TotalTime, SelfTime)           "
+ 						  "   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)  ",
+						  8, argtypes);
 	if (!planptr)
 		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
 
 	args[0] = callgraph_buffer_id;
-	args[1] = ObjectIdGetDatum(top_level_function_oid);
+	//args[1] = ObjectIdGetDatum(top_level_function_oid);
 
 	hash_seq_init(&hst, edge_hash_table);
 	while ((elem = hash_seq_search(&hst)) != NULL)
 	{
-		args[2] = ObjectIdGetDatum(elem->key.caller);
-		args[3] = ObjectIdGetDatum(elem->key.callee);
-		args[4] = Int8GetDatum(elem->num_calls);
-		args[5] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(elem->total_time));
-		args[6] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(elem->self_time));
+		if (elem->key.caller_nspname != NULL)
+		{
+			args[1] = CStringGetTextDatum(elem->key.caller_nspname);
+			args[2] = CStringGetTextDatum(elem->key.caller_signature);
+			nulls[1] = nulls[2] = ' ';
+		}
+		else
+			nulls[1] = nulls[2] = 'n';
 
-		if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
+		args[3] = CStringGetTextDatum(elem->key.callee_nspname);
+		args[4] = CStringGetTextDatum(elem->key.callee_signature);
+		args[5] = Int8GetDatum(elem->num_calls);
+		args[6] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(elem->total_time));
+		args[7] = Float8GetDatum(INSTR_TIME_GET_MILLISEC(elem->self_time));
+
+		if ((ret = SPI_execp(planptr, args, nulls, 0)) < 0)
 			elog(ERROR, "SPI_execp() failed: %d", ret);
 	}
 
 	SPI_finish();
 }
 
+static char *
+cg_get_function_signature(HeapTuple htup, Form_pg_proc procform)
+{
+	StringInfoData str;
+	int nargs;
+	int i;
+	int input_argno;
+	Oid *argtypes;
+	char **argnames;
+	char *argmodes;
+
+	initStringInfo(&str);
+	appendStringInfo(&str, "%s(", NameStr(procform->proname));
+	nargs = get_func_arg_info(htup, &argtypes, &argnames, &argmodes);
+	input_argno = 0;
+	for (i = 0; i < nargs; i++)
+	{
+		Oid argtype = argtypes[i];
+
+		if (argmodes &&
+			argmodes[i] != PROARGMODE_IN &&
+			argmodes[i] != PROARGMODE_INOUT)
+			continue;
+
+		if (input_argno++ > 0)
+			appendStringInfoString(&str, ", ");
+
+		appendStringInfoString(&str, format_type_be(argtype));
+	}
+	appendStringInfoChar(&str, ')');
+
+	return str.data;
+}
+
 static void
-call_graph_fmgr_hook(FmgrHookEventType event,
-			  FmgrInfo *flinfo, Datum *args)
+cg_lookup_function(Oid fnoid, char **nspname, char **signature)
+{
+	HeapTuple htup;
+	Form_pg_proc procform;
+	Oid nspoid;
+
+	htup = SearchSysCache1(PROCOID, ObjectIdGetDatum(fnoid));
+	if (!HeapTupleIsValid(htup))
+	{
+		ReleaseSysCache(htup);
+		return;
+	}
+	procform = (Form_pg_proc) GETSTRUCT(htup);
+
+	*signature = cg_get_function_signature(htup, procform);
+	nspoid = procform->pronamespace;
+	ReleaseSysCache(htup);
+
+	*nspname = get_namespace_name(nspoid);
+	if (!*nspname)
+	{
+		pfree(*signature);
+		*signature = NULL;
+		return;
+	}
+}
+
+static void
+cg_enter_function(Oid fnoid, instr_time current_time)
+{
+	EdgeHashKey key;
+	EdgeHashElem *elem;
+	bool found;
+	MemoryContext oldctx;
+
+	Assert(cg_memory_ctx != NULL);
+
+	if (call_stack == NIL)
+	{
+		top_level_function_oid = fnoid;
+
+		/*
+		 * We're about to enter the top level function; check whether we've
+		 * been disabled.
+		 */
+		if (!enable_call_graph)
+		{
+			tracking_current_graph = false;
+			recursion_depth = 1;
+			return;
+		}
+
+		/*
+		 * OK, the user wants us to start tracking this call graph; we need to
+		 * create the hash table.
+		*/
+		cg_create_edge_hash_table();
+		tracking_current_graph = true;
+
+		key.caller_nspname = NULL;
+		key.caller_signature = NULL;
+	}
+	else
+	{
+		if (!tracking_current_graph)
+		{
+			/*
+			 * Not tracking this graph -- just see whether we've recursed into
+			 * the top level function (see the comments near the beginning of
+			 * this file)
+			 */
+			if (fnoid == top_level_function_oid)
+				recursion_depth++;
+
+			return;
+		}
+
+		elem = linitial(call_stack);
+
+		/*
+		 * Calculate the self time we spent in the previous function
+		 * (elem->key.callee in this case).
+		 */
+		INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
+
+		key.caller_nspname = elem->key.callee_nspname;
+		key.caller_signature = elem->key.callee_signature;
+	}
+
+	oldctx = MemoryContextSwitchTo(cg_memory_ctx);
+	cg_lookup_function(fnoid, &key.callee_nspname, &key.callee_signature);
+	MemoryContextSwitchTo(oldctx);
+
+	elem = hash_search(edge_hash_table, (void *) &key, HASH_ENTER, &found);
+	if (found)
+		elem->num_calls++;
+	else
+	{
+		elem->key = key;
+		elem->num_calls = 1;
+		INSTR_TIME_SET_ZERO(elem->total_time);
+		INSTR_TIME_SET_ZERO(elem->self_time);
+	}
+
+	call_stack = lcons(elem, call_stack);
+
+	INSTR_TIME_SET_CURRENT(elem->total_time_start);
+	memcpy(&current_self_time_start, &elem->total_time_start, sizeof(instr_time));
+}
+
+static void
+cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args)
 {
 	bool aborted = false;
-	EdgeHashKey key;
 	EdgeHashElem *elem;
 	instr_time current_time;
 
@@ -438,87 +464,22 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 	switch (event)
 	{
 		case FHET_START:
-		{
-			bool found;
-
-			if (call_stack == NIL)
-			{
-				top_level_function_oid = flinfo->fn_oid;
-
-				/* We're about to enter the top level function; check whether we've been disabled */
-				if (!enable_call_graph)
-				{
-					tracking_current_graph = false;
-					recursion_depth = 1;
-					return;
-				}
-
-				/* Start tracking the call graph; we need to create the hash table */
-				create_edge_hash_table();
-				tracking_current_graph = true;
-
-				/* If we're tracking table usage, take a stat snapshot now */
-				if (track_table_usage)
-					table_stat_snapshot = get_table_stat_snapshot();
-
-				/* Use InvalidOid for the imaginary edge into the top level function */
-				key.caller = InvalidOid;
-			}
-			else
-			{
-				if (!tracking_current_graph)
-				{
-					/*
-					 * Not tracking this graph, just see whether we've recursed into the top level function
-					 * (see the comments near the beginning of the file)
-					 */
-					if (flinfo->fn_oid == top_level_function_oid)
-						recursion_depth++;
-
-					return;
-				}
-
-				elem = linitial(call_stack);
-
-				/* Calculate the self time we spent in the previous function (elem->key.callee in this case). */
-				INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
-
-				key.caller = elem->key.callee;
-			}
-
-			key.callee = flinfo->fn_oid;
-
-			elem = hash_search(edge_hash_table, (void *) &key, HASH_ENTER, &found);
-			if (found)
-				elem->num_calls++;
-			else
-			{
-				elem->key = key;
-				elem->num_calls = 1;
-				INSTR_TIME_SET_ZERO(elem->total_time);
-				INSTR_TIME_SET_ZERO(elem->self_time);
-			}
-
-			call_stack = lcons(elem, call_stack);
-
-			INSTR_TIME_SET_CURRENT(elem->total_time_start);
-			memcpy(&current_self_time_start, &elem->total_time_start, sizeof(instr_time));
-		}
+			cg_enter_function(flinfo->fn_oid, current_time);
 			break;
 
 		/*
-		 * In both ABORT and END cases we pop off the last element from the call stack, and if the stack
-		 * is empty, we process the data we gathered.
-		 *
-		 * XXX for some reason if the top level function aborted SPI won't work correctly.
+		 * In both ABORT and END cases we pop off the last element from the
+		 * call stack.  If we didn't abort and the stack is empty, we process
+		 * the data we gathered.  Unfortunately we can't process any data if an
+		 * exception is raised as we're in a failed transaction.
 		 */
 		case FHET_ABORT:
 			aborted = true;
 
 		case FHET_END:
 			/*
-			 * If we're not tracking this particular graph, we only need to see whether we're done
-			 * with the graph or not.
+			 * If we're not tracking this particular graph, we only need to see
+			 * whether we're done with the graph or not.
 			 */
 			if (!tracking_current_graph)
 			{
@@ -529,11 +490,8 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 						top_level_function_oid = InvalidOid;
 				}
 
-				Assert(table_stat_snapshot == NULL);
 				return;
 			}
-
-			Assert(((EdgeHashElem *) linitial(call_stack))->key.callee == flinfo->fn_oid);
 
 			elem = linitial(call_stack);
 			INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
@@ -543,60 +501,50 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 
 			if (call_stack != NIL)
 			{
-				/* we're going back to the previous node, start recording its self_time */
+				/*
+				 * We're going back to the previous node, start recording its
+				 * self_time.
+				 */
 				INSTR_TIME_SET_CURRENT(current_self_time_start);
 				break;
 			}
 
 			/*
-			 * At this point we're done with the graph.  If the top level function exited cleanly, we can
-			 * process the data we've gathered in the hash table and add that data into the buffer table.
+			 * At this point we're done with the graph.  If the top level
+			 * function exited cleanly, we can process the data we've gathered
+			 * in the hash table and add that data into the buffer table.
 			 */
 			if (!aborted)
 			{
-				/* temporarily disable call graph to allow triggers on the target tables */
+				/*
+				 * Temporarily disable call graph to allow triggers on the
+				 * target tables.
+				 */
 				bool save_enable_call_graph = enable_call_graph;
 				enable_call_graph = false;
 
 				/*
-				 * It is in some cases possible that process_edge_data() throws an exception.  We really need to
-				 * clean up our state in case that happens.
+				 * It is in some cases possible that process_edge_data() throws
+				 * an exception.  We really need to clean up our state in case
+				 * that happens.
 				 */
 				PG_TRY();
 				{
-					Datum buffer_id = assign_callgraph_buffer_id();
+					Datum buffer_id = cg_assign_callgraph_buffer_id();
 
-					/* Better check both conditions here */
-					if (table_stat_snapshot && track_table_usage)
-						insert_snapshot_delta(buffer_id, table_stat_snapshot);
-
-					process_edge_data(buffer_id);
+					cg_process_edge_data(buffer_id);
 					enable_call_graph = save_enable_call_graph;
 				}
 				PG_CATCH();
 				{
-					if (table_stat_snapshot)
-					{
-						release_table_stat_snapshot(table_stat_snapshot);
-						table_stat_snapshot = NULL;
-					}
-
 					enable_call_graph = save_enable_call_graph;
-					destroy_edge_hash_table();
-					top_level_function_oid = InvalidOid;
+					cg_release_graph_state();
 					PG_RE_THROW();
 				}
 				PG_END_TRY();
 			}
 
-			if (table_stat_snapshot)
-			{
-				release_table_stat_snapshot(table_stat_snapshot);
-				table_stat_snapshot = NULL;
-			}
-
-			destroy_edge_hash_table();
-			top_level_function_oid = InvalidOid;
+			cg_release_graph_state();
 
 			break;
 		default:
@@ -611,15 +559,27 @@ call_graph_fmgr_hook(FmgrHookEventType event,
 void
 _PG_init(void)
 {
-	DefineCustomBoolVariable("call_graph.enable", "Enables real-time tracking of function calls.", "", &enable_call_graph, false, PGC_USERSET,
-							 0, NULL, NULL, NULL);
-	DefineCustomBoolVariable("call_graph.track_table_usage", "Enables tracking of per-callgraph table usage.", "Has no effect if call_graph.enable is not set.", &track_table_usage, false, PGC_USERSET,
+	if (!process_shared_preload_libraries_in_progress)
+		elog(ERROR, "please no");
+
+	DefineCustomBoolVariable("call_graph.enable",
+							 "Enables real-time tracking of function calls.",
+							 "",
+							 &enable_call_graph,
+							 false,
+							 PGC_USERSET,
 							 0, NULL, NULL, NULL);
 
 	/* Install our hooks */
 	next_needs_fmgr_hook = needs_fmgr_hook;
-	needs_fmgr_hook = call_graph_needs_fmgr_hook;
+	needs_fmgr_hook = cg_needs_fmgr_hook;
 
 	next_fmgr_hook = fmgr_hook;
-	fmgr_hook = call_graph_fmgr_hook;
+	fmgr_hook = cg_fmgr_hook;
+
+	cg_memory_ctx = AllocSetContextCreate(TopMemoryContext,
+										  "call_graph memory context",
+										  ALLOCSET_SMALL_MINSIZE,
+										  ALLOCSET_SMALL_INITSIZE,
+										  ALLOCSET_SMALL_MAXSIZE);
 }

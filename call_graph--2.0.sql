@@ -1,109 +1,89 @@
-/* call_graph/call_graph--1.4.sql */
+/* call_graph/call_graph--2.0.sql */
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 \echo Use "CREATE EXTENSION call_graph" to load this file. \quit
 
-GRANT USAGE ON SCHEMA call_graph TO PUBLIC;
+CREATE USER call_graph;
+ALTER SCHEMA call_graph OWNER TO call_graph;
 
-CREATE FUNCTION call_graph_version() RETURNS text AS $$ SELECT text '1.4'; $$ LANGUAGE sql;
+SET ROLE call_graph;
+
+CREATE TABLE Functions (
+	FunctionID serial NOT NULL,
+	Signature text NOT NULL,
+
+	UNIQUE (Signature),
+	PRIMARY KEY (FunctionID)
+);
 
 CREATE SEQUENCE seqCallGraphBuffer;
-CREATE UNLOGGED TABLE CallGraphBuffer(
-CallGraphBufferID bigint NOT NULL,
-TopLevelFunction oid NOT NULL CHECK (TopLevelFunction <> '0'),
-Caller oid NOT NULL,
-Callee oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-Datestamp timestamptz NOT NULL default now()
+CREATE UNLOGGED TABLE CallGraphBuffer (
+	CallGraphBufferID bigint NOT NULL,
+	--TopLevelFunction text NOT NULL,
+	CallerNspname text,
+	CallerSignature text,
+	CalleeNspname text NOT NULL,
+	CalleeSignature text NOT NULL,
+	Calls bigint NOT NULL,
+	TotalTime double precision NOT NULL,
+	SelfTime double precision NOT NULL,
+	Datestamp timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE UNLOGGED TABLE TableAccessBuffer(
-CallGraphBufferID bigint NOT NULL,
-relid oid NOT NULL,
-seq_scan bigint NOT NULL,
-seq_tup_read bigint NOT NULL,
-idx_scan bigint NOT NULL,
-idx_tup_read bigint NOT NULL,
-n_tup_ins bigint NOT NULL,
-n_tup_upd bigint NOT NULL,
-n_tup_del bigint NOT NULL
+--CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
+
+CREATE TABLE CallGraphs (
+	CallGraphID bigserial NOT NULL,
+	TopLevelFunction int NOT NULL,
+	EdgesHash text NOT NULL,
+	Calls bigint NOT NULL,
+	TotalTime double precision NOT NULL,
+	SelfTime double precision NOT NULL,
+	FirstCall timestamptz NOT NULL,
+	LastCall timestamptz NOT NULL,
+	PRIMARY KEY (CallGraphID),
+	UNIQUE (TopLevelFunction, EdgesHash)
 );
 
--- make sure all users are allowed to track data
-GRANT USAGE ON SEQUENCE seqCallGraphBuffer TO PUBLIC;
-GRANT INSERT ON TABLE CallGraphBuffer TO PUBLIC;
-GRANT INSERT ON TABLE TableAccessBuffer TO PUBLIC;
-
-CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
-CREATE INDEX TableAccessBuffer_CallGraphBufferID_Index ON TableAccessBuffer(CallGraphBufferID);
-
-CREATE TABLE CallGraphs(
-CallGraphID bigserial NOT NULL,
-TopLevelFunction oid NOT NULL,
-EdgesHash text NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-FirstCall timestamptz NOT NULL,
-LastCall timestamptz NOT NULL,
-PRIMARY KEY (CallGraphID),
-UNIQUE (TopLevelFunction, EdgesHash)
+CREATE TABLE Edges (
+	EdgeID bigserial NOT NULL,
+	CallGraphID int NOT NULL REFERENCES CallGraphs(CallGraphID),
+	Caller int NOT NULL REFERENCES Functions(FunctionID),
+	Callee int NOT NULL REFERENCES Functions(FunctionID),
+	Calls bigint NOT NULL,
+	TotalTime double precision NOT NULL,
+	SelfTime double precision NOT NULL,
+	PRIMARY KEY (EdgeID),
+	UNIQUE (CallGraphID, Caller, Callee)
 );
 
-CREATE TABLE Edges(
-EdgeID bigserial NOT NULL,
-CallGraphID int NOT NULL REFERENCES CallGraphs(CallGraphID),
-Caller Oid NOT NULL,
-Callee Oid NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-PRIMARY KEY (EdgeID),
-UNIQUE (CallGraphID, Caller, Callee)
+CREATE TABLE DailyStats (
+	CallGraphID bigserial NOT NULL,
+	Date date NOT NULL,
+	Calls bigint NOT NULL,
+	TotalTime double precision NOT NULL,
+	SelfTime double precision NOT NULL,
+	FirstCall timestamptz NOT NULL,
+	LastCall timestamptz NOT NULL,
+	PRIMARY KEY (CallGraphID, Date)
 );
 
-CREATE TABLE TableUsage(
-CallGraphID bigint NOT NULL,
-relid oid NOT NULL,
-seq_scan bigint NOT NULL,
-seq_tup_read bigint NOT NULL,
-idx_scan bigint NOT NULL,
-idx_tup_read bigint NOT NULL,
-n_tup_ins bigint NOT NULL,
-n_tup_upd bigint NOT NULL,
-n_tup_del bigint NOT NULL,
-
-PRIMARY KEY (CallGraphID, relid)
-);
-
-CREATE TABLE DailyStats(
-CallGraphID bigserial NOT NULL,
-Date date NOT NULL,
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-FirstCall timestamptz NOT NULL,
-LastCall timestamptz NOT NULL,
-PRIMARY KEY (CallGraphID, Date)
-);
-
-CREATE TABLE HourlyStats(
-CallGraphID bigserial NOT NULL,
-DateStamp timestamptz NOT NULL CHECK (date_trunc('hour', DateStamp) = DateStamp),
-Calls bigint NOT NULL,
-TotalTime double precision NOT NULL,
-SelfTime double precision NOT NULL,
-FirstCall timestamptz NOT NULL,
-LastCall timestamptz NOT NULL,
-PRIMARY KEY (CallGraphID, DateStamp)
+CREATE TABLE HourlyStats (
+	CallGraphID bigserial NOT NULL,
+	Datestamp timestamptz NOT NULL CHECK (date_trunc('hour', Datestamp) = Datestamp),
+	Calls bigint NOT NULL,
+	TotalTime double precision NOT NULL,
+	SelfTime double precision NOT NULL,
+	FirstCall timestamptz NOT NULL,
+	LastCall timestamptz NOT NULL,
+	PRIMARY KEY (CallGraphID, Datestamp)
 );
 
 CREATE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
  RETURNS SETOF bigint
+ SECURITY DEFINER
  LANGUAGE plpgsql
- SET search_path TO @extschema@
+ SET search_path TO call_graph
 AS $function$
 DECLARE
 _MinBufferID bigint;
@@ -116,19 +96,25 @@ BEGIN
 
 _NumGraphs := 0;
 
--- The first thing we need to do is to identify the callgraph each CallGraphBufferID represents.  We currently do this by
--- calculating the MD5 hash of the binary representation of an array that contains ROW(caller, callee) values ordered by
--- (caller, callee).  This hash can then be used to uniquely identify each call graph easily and efficiently.
+-- The first thing we need to do is to identify the callgraph each
+-- CallGraphBufferID represents.  We currently do this by calculating the MD5
+-- hash of the binary representation of an array that contains
+-- ROW(caller, callee) values ordered by (caller, callee).  This hash can then
+-- be used to uniquely identify each call graph easily and efficiently.
 --
--- In the below query, the subquery aggregates the data for each CallGraphBufferID, calculating the hash representation of
--- the edges.  At the same time, it pulls some additional data from the row where Caller = 0 (there should only ever be one
--- such row per CallGraphBufferID, so the choice of aggregate function shouldn't matter; I chose max) which is then stored
--- in the CallGraphs table.  Also note that we are grouping by (CallGraphBufferID, TopLevelFunction), which is effectively
--- the same as grouping by only CallGraphBufferID; there should NEVER be more than one TopLevelFunction for a
--- CallGraphBufferID.
+-- In the below query, the subquery aggregates the data for each
+-- CallGraphBufferID, calculating the hash representation of the edges.  At the
+-- same time, it pulls some additional data from the row where Caller = 0
+-- (there should only ever be one such row per CallGraphBufferID, so the choice
+-- of aggregate function shouldn't matter; I chose max) which is then stored in
+-- the CallGraphs table.  Also note that we are grouping by (CallGraphBufferID,
+-- TopLevelFunction), which is effectively the same as grouping by only
+-- CallGraphBufferID; there should NEVER be more than one TopLevelFunction for
+-- a CallGraphBufferID.
 --
--- After the subquery is done, we aggregate the data again, this time for each (TopLevelFunction, EdgesHash) pair.  This
--- way we can do the processing one callgraph at a time, rather than a CallGraphBufferID at a time.
+-- After the subquery is done, we aggregate the data again, this time for each
+-- (TopLevelFunction, EdgesHash) pair.  This way we can do the processing one
+-- callgraph at a time, rather than a CallGraphBufferID at a time.
 
 _MinBufferID = (SELECT min(CallGraphBufferID) FROM call_graph.CallGraphBuffer);
 
@@ -182,11 +168,12 @@ LOOP
         _GraphExists := FALSE;
     END IF;
 
-    -- If the graph existed, all of the edges should exist too, and we can simply UPDATE them.  If it didn't,
-    -- we need to add the edges.
+    -- If the graph existed, all of the edges should exist too, and we can
+	-- simply UPDATE them.  If it didn't, we need to add the edges.
     --
-    -- Note that although we're doing multiple CallGraphBufferIDs at a time, we're only working on a single
-    -- call graph, so we can safely aggregate the data in CallGraphBufferSum to avoid doing multiple UPDATEs.
+    -- Note that although we're doing multiple CallGraphBufferIDs at a time,
+	-- we're only working on a single call graph, so we can safely aggregate
+	-- the data in CallGraphBufferSum to avoid doing multiple UPDATEs.
 
     IF _GraphExists THEN
         UPDATE Edges SET
@@ -275,3 +262,5 @@ RETURN;
 END;
 $function$
 ;
+
+RESET ROLE;
