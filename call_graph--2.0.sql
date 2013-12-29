@@ -10,16 +10,16 @@ SET ROLE call_graph;
 
 CREATE TABLE Functions (
 	FunctionID serial NOT NULL,
+	Nspname text NOT NULL,
 	Signature text NOT NULL,
 
-	UNIQUE (Signature),
+	UNIQUE (Nspname, Signature),
 	PRIMARY KEY (FunctionID)
 );
 
 CREATE SEQUENCE seqCallGraphBuffer;
 CREATE UNLOGGED TABLE CallGraphBuffer (
 	CallGraphBufferID bigint NOT NULL,
-	--TopLevelFunction text NOT NULL,
 	CallerNspname text,
 	CallerSignature text,
 	CalleeNspname text NOT NULL,
@@ -30,11 +30,20 @@ CREATE UNLOGGED TABLE CallGraphBuffer (
 	Datestamp timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE UNLOGGED TABLE CallGraphBufferMeta (
+	CallGraphBufferID bigint NOT NULL,
+	-- top level function info
+	Nspname text NOT NULL,
+	Signature text NOT NULL,
+	-- caller info
+	CallerRolname text NOT NULL
+);
+
 --CREATE INDEX CallGraphBuffer_CallGraphBufferID_TopLevelFunction_Index ON CallGraphBuffer(CallGraphBufferID, TopLevelFunction);
 
 CREATE TABLE CallGraphs (
 	CallGraphID bigserial NOT NULL,
-	TopLevelFunction int NOT NULL,
+	TopLevelFunction int NOT NULL REFERENCES Functions(FunctionID),
 	EdgesHash text NOT NULL,
 	Calls bigint NOT NULL,
 	TotalTime double precision NOT NULL,
@@ -79,6 +88,50 @@ CREATE TABLE HourlyStats (
 	PRIMARY KEY (CallGraphID, Datestamp)
 );
 
+CREATE FUNCTION UpsertFunction(_Nspname text, _Signature text)
+ RETURNS int
+ LANGUAGE sql
+AS $function$
+-- Assumes exclusive access
+WITH Sel AS (
+	SELECT FunctionID
+	FROM call_graph.Functions
+	WHERE Nspname = $1 AND Signature = $2
+), Ins AS (
+	INSERT INTO call_graph.Functions (Nspname, Signature)
+	SELECT $1, $2
+	WHERE NOT EXISTS (SELECT 1 FROM Sel)
+	RETURNING FunctionID
+)
+SELECT FunctionID FROM Sel
+	UNION
+SELECT FunctionID FROM Ins
+;
+$function$
+;
+
+CREATE FUNCTION UpsertCallGraphBuffer(OUT TopLevelFunction int, OUT Caller int, OUT Callee int, _Buffer call_graph.CallGraphBuffer)
+ RETURNS RECORD
+ SECURITY DEFINER
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+
+SELECT UpsertFunction(Nspname, Signature) INTO TopLevelFunction
+	FROM CallGraphBufferMeta
+	WHERE CallGraphBufferMeta.CallGraphBufferID = (_Buffer).CallGraphBufferID;
+IF NOT FOUND THEN
+	RAISE EXCEPTION 'could not find meta information for CallGraphBufferID %', (_Buffer).CallGraphBufferID;
+END IF;
+
+Caller := UpsertFunction((_Buffer).CallerNspname, (_Buffer).CallerSignature);
+Callee := UpsertFunction((_Buffer).CalleeNspname, (_Buffer).CalleeSignature);
+
+END
+$function$
+;
+
+
 CREATE FUNCTION ProcessCallGraphBuffers(_MaxBufferCount bigint)
  RETURNS SETOF bigint
  SECURITY DEFINER
@@ -91,20 +144,19 @@ _CallGraphID bigint;
 _GraphExists bool;
 _NumGraphs int;
 _ record;
-
 BEGIN
 
 _NumGraphs := 0;
 
 -- The first thing we need to do is to identify the callgraph each
 -- CallGraphBufferID represents.  We currently do this by calculating the MD5
--- hash of the binary representation of an array that contains
--- ROW(caller, callee) values ordered by (caller, callee).  This hash can then
--- be used to uniquely identify each call graph easily and efficiently.
+-- hash of the binary representation of an array that contains ROW(caller,
+-- callee) values ordered by (caller, callee).  This hash can then be used to
+-- uniquely identify each call graph easily and efficiently.
 --
 -- In the below query, the subquery aggregates the data for each
 -- CallGraphBufferID, calculating the hash representation of the edges.  At the
--- same time, it pulls some additional data from the row where Caller = 0
+-- same time, it pulls some additional data from the row where Caller is NULL
 -- (there should only ever be one such row per CallGraphBufferID, so the choice
 -- of aggregate function shouldn't matter; I chose max) which is then stored in
 -- the CallGraphs table.  Also note that we are grouping by (CallGraphBufferID,
@@ -133,19 +185,28 @@ FROM (
         CallGraphBufferID,
         TopLevelFunction,
         md5(array_send(array_agg(ROW(Caller, Callee) ORDER BY Caller, Callee))) AS EdgesHash,
-        MAX(CASE WHEN Caller = 0 THEN Calls     END) AS Calls,
-        MAX(CASE WHEN Caller = 0 THEN TotalTime END) AS TotalTime,
-        MAX(CASE WHEN Caller = 0 THEN SelfTime  END) AS SelfTime,
+        MAX(CASE WHEN Caller IS NULL THEN Calls     END) AS Calls,
+        MAX(CASE WHEN Caller IS NULL THEN TotalTime END) AS TotalTime,
+        MAX(CASE WHEN Caller IS NULL THEN SelfTime  END) AS SelfTime,
         MAX(Datestamp) AS CallStamp
     FROM
 	(
 		SELECT
-			CallGraphBufferID, TopLevelFunction, Caller, Callee, Calls, TotalTime, SelfTime, DateStamp
+			CallGraphBufferID, (Upsert).TopLevelFunction,
+			(Upsert).Caller, (Upsert).Callee,
+			Calls, TotalTime, SelfTime, Datestamp
 		FROM
-			CallGraphBuffer
-		WHERE
-			CallGraphBufferID >= _MinBufferID AND CallGraphBufferID <= _MinBufferID + _MaxBufferCount
-	) AS Buffers
+		(
+			SELECT
+				CallGraphBufferID, Upsert_CallGraphBuffer(CallGraphBuffer) AS Upsert,
+				TotalTime, SelfTime, Datestamp
+			FROM CallGraphBuffer
+			WHERE
+				CallGraphBufferID >= _MinBufferID AND
+				CallGraphBufferID <= _MinBufferID + _MaxBufferCount
+			OFFSET 0
+		) CallGraphBuffer
+	) AS CallGraphBuffer
     GROUP BY CallGraphBufferID, TopLevelFunction
 ) AS GroupedBuffers
 GROUP BY TopLevelFunction, EdgesHash

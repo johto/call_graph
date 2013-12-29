@@ -10,8 +10,9 @@
 #include "port.h"
 #include "access/hash.h"
 #include "access/xact.h"
-#include "utils/guc.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
+#include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/lsyscache.h"
@@ -75,18 +76,30 @@ static fmgr_hook_type next_fmgr_hook = NULL;
  */
 static MemoryContext cg_memory_ctx = NULL;
 
-static HTAB *edge_hash_table = NULL;
+static struct {
+	List *call_stack;
+	HTAB *edge_hash_table;
 
-static List *call_stack = NULL;
-static Oid top_level_function_oid = -1;
+	/* information about the top-level function */
+	char *nspname;
+	char *signature;
 
-static bool tracking_current_graph = false;
-static int recursion_depth = 0;
+	/* rolname of the caller of the top-level function */
+	char *rolname;
 
-static instr_time current_self_time_start; /* we only need one variable to keep track of all self_times */
+	/* Oid of the call_graph user */
+	Oid cg_user_oid;
 
+	/* we only need one variable to keep track of all self_times */
+	instr_time current_self_time_start;
+} cg_graph;
+
+static bool cg_tracking_current_graph = false;
+static Oid cg_top_level_function_oid = InvalidOid;
+static int cg_recursion_depth = 0;
 
 static void cg_lookup_function(Oid fnoid, char **nspname, char **signature);
+static void cg_exit_function(Oid fnoid, instr_time current_time, bool aborted);
 static void cg_enter_function(Oid fnoid, instr_time current_time);
 static bool cg_needs_fmgr_hook(Oid functionId);
 static void cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args);
@@ -94,8 +107,8 @@ static void cg_create_edge_hash_table();
 static void cg_destroy_edge_hash_table();
 static void cg_release_graph_state();
 static Datum cg_assign_callgraph_buffer_id();
+static void cg_insert_buffer_metadata(Datum callgraph_buffer_id);
 static void cg_process_edge_data(Datum callgraph_buffer_id);
-
 
 
 /* hash funcs */
@@ -119,13 +132,38 @@ cg_needs_fmgr_hook(Oid functionId)
 static void
 cg_release_graph_state()
 {
-	Assert(call_stack == NIL);
+	Assert(cg_graph.call_stack == NIL);
 
 	cg_destroy_edge_hash_table();
-	top_level_function_oid = InvalidOid;
-	tracking_current_graph = false;
+	cg_tracking_current_graph = false;
 
 	MemoryContextReset(cg_memory_ctx);
+}
+
+static bool
+cg_init_graph_state(Oid fnoid)
+{
+	MemoryContext oldctx;
+
+	cg_graph.cg_user_oid = get_role_oid("call_graph", true);
+	if (!OidIsValid(cg_graph.cg_user_oid))
+	{
+		elog(WARNING, "could not find user \"call_graph\", but call_graph is enabled");
+		return false;
+	}
+
+	oldctx = MemoryContextSwitchTo(cg_memory_ctx);
+
+	/* TODO: fail nicely if something goes wrong in this section */
+	cg_create_edge_hash_table();
+	cg_lookup_function(fnoid, &cg_graph.nspname, &cg_graph.signature);
+	cg_graph.rolname = GetUserNameFromId(GetOuterUserId());
+
+	MemoryContextSwitchTo(oldctx);
+
+	cg_tracking_current_graph = true;
+
+	return true;
 }
 
 static uint32
@@ -153,8 +191,7 @@ cg_hash_fn(const void *key, Size keysize)
 	h ^= DatumGetUInt32(hash_any((const unsigned char *) edge->callee_signature,
 								 strlen(edge->callee_signature)));
 
-	//return h;
-	return h ^ h;
+	return h;
 }
 
 /*
@@ -205,8 +242,9 @@ static void
 cg_create_edge_hash_table()
 {
 	HASHCTL ctl;
+	int flags;
 
-	Assert(edge_hash_table == NULL);
+	Assert(cg_graph.edge_hash_table == NULL);
 
 	memset(&ctl, 0, sizeof(ctl));
 	ctl.keysize = sizeof(EdgeHashKey);
@@ -216,17 +254,19 @@ cg_create_edge_hash_table()
 	/* use our memory context for the hash table */
 	ctl.hcxt = cg_memory_ctx;
 
-	edge_hash_table = hash_create("call_graph_edge_hash_table", 128, &ctl,
-								  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT);
+	flags = HASH_ELEM | HASH_FUNCTION | HASH_COMPARE | HASH_CONTEXT;
+
+	cg_graph.edge_hash_table =
+			hash_create("call_graph_edge_hash_table", 128, &ctl, flags);
 }
 
 static void
 cg_destroy_edge_hash_table()
 {
-	Assert(edge_hash_table != NULL);
+	Assert(cg_graph.edge_hash_table != NULL);
 
-	hash_destroy(edge_hash_table);
-	edge_hash_table = NULL;
+	hash_destroy(cg_graph.edge_hash_table);
+	cg_graph.edge_hash_table = NULL;
 }
 
 static Datum
@@ -247,6 +287,33 @@ cg_assign_callgraph_buffer_id()
 }
 
 static void
+cg_insert_buffer_metadata(Datum callgraph_buffer_id)
+{
+	int ret;
+	SPIPlanPtr planptr;
+	Datum args[4];
+	Oid argtypes[] = { INT8OID, TEXTOID, TEXTOID, TEXTOID, InvalidOid };
+
+	planptr = SPI_prepare("INSERT INTO                                 "
+						  "   call_graph.CallGraphBufferMeta           "
+ 						  "     (CallGraphBufferID,                    "
+ 						  "      Nspname, Signature, CallerRolname)    "
+						  "   VALUES ($1, $2, $3, $4)                  ",
+						  4, argtypes);
+	if (!planptr)
+		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
+
+	args[0] = callgraph_buffer_id;
+	args[1] = CStringGetTextDatum(cg_graph.nspname);
+	args[2] = CStringGetTextDatum(cg_graph.signature);
+	args[3] = CStringGetTextDatum(cg_graph.rolname);
+
+	if ((ret = SPI_execp(planptr, args, NULL, 0)) < 0)
+		elog(ERROR, "SPI_execp() failed: %d", ret);
+}
+
+
+static void
 cg_process_edge_data(Datum callgraph_buffer_id)
 {
 	int ret;
@@ -260,10 +327,12 @@ cg_process_edge_data(Datum callgraph_buffer_id)
 
 
 	/* Start by freezing the hash table.  This saves us some trouble. */
-	hash_freeze(edge_hash_table);
+	hash_freeze(cg_graph.edge_hash_table);
 
 	if ((ret = SPI_connect()) < 0)
 		elog(ERROR, "could not connect to the SPI: %d", ret);
+
+	cg_insert_buffer_metadata(callgraph_buffer_id);
 
 	planptr = SPI_prepare("INSERT INTO                                 "
 						  "   call_graph.CallGraphBuffer               "
@@ -277,19 +346,20 @@ cg_process_edge_data(Datum callgraph_buffer_id)
 		elog(ERROR, "could not prepare an SPI plan for the INSERT into CallGraphBuffer");
 
 	args[0] = callgraph_buffer_id;
-	//args[1] = ObjectIdGetDatum(top_level_function_oid);
-
-	hash_seq_init(&hst, edge_hash_table);
+	hash_seq_init(&hst, cg_graph.edge_hash_table);
 	while ((elem = hash_seq_search(&hst)) != NULL)
 	{
-		if (elem->key.caller_nspname != NULL)
+		Assert(elem->key.callee_nspname != NULL);
+		Assert(elem->key.callee_signature != NULL);
+
+		if (elem->key.caller_nspname == NULL)
+			nulls[1] = nulls[2] = 'n';
+		else
 		{
 			args[1] = CStringGetTextDatum(elem->key.caller_nspname);
 			args[2] = CStringGetTextDatum(elem->key.caller_signature);
 			nulls[1] = nulls[2] = ' ';
 		}
-		else
-			nulls[1] = nulls[2] = 'n';
 
 		args[3] = CStringGetTextDatum(elem->key.callee_nspname);
 		args[4] = CStringGetTextDatum(elem->key.callee_signature);
@@ -372,67 +442,67 @@ cg_enter_function(Oid fnoid, instr_time current_time)
 	EdgeHashKey key;
 	EdgeHashElem *elem;
 	bool found;
-	MemoryContext oldctx;
 
 	Assert(cg_memory_ctx != NULL);
 
-	if (call_stack == NIL)
+	if (cg_graph.call_stack == NIL)
 	{
-		top_level_function_oid = fnoid;
-
 		/*
 		 * We're about to enter the top level function; check whether we've
-		 * been disabled.
+		 * been disabled.  Also if something goes wrong while trying to
+		 * initialize the per-graph state, abandon any attempts at trying to
+		 * track the current graph.
 		 */
-		if (!enable_call_graph)
+		if (!enable_call_graph || !cg_init_graph_state(fnoid))
 		{
-			tracking_current_graph = false;
-			recursion_depth = 1;
+			cg_top_level_function_oid = fnoid;
+			cg_tracking_current_graph = false;
+			cg_recursion_depth = 1;
 			return;
 		}
 
-		/*
-		 * OK, the user wants us to start tracking this call graph; we need to
-		 * create the hash table.
-		*/
-		cg_create_edge_hash_table();
-		tracking_current_graph = true;
-
 		key.caller_nspname = NULL;
 		key.caller_signature = NULL;
+
+		/* cg_init_graph_state should have populated these for us */
+		key.callee_nspname = cg_graph.nspname;
+		key.callee_signature = cg_graph.signature;
 	}
 	else
 	{
-		if (!tracking_current_graph)
+		MemoryContext oldctx;
+
+		if (!cg_tracking_current_graph)
 		{
 			/*
 			 * Not tracking this graph -- just see whether we've recursed into
 			 * the top level function (see the comments near the beginning of
 			 * this file)
 			 */
-			if (fnoid == top_level_function_oid)
-				recursion_depth++;
+			if (fnoid == cg_top_level_function_oid)
+				cg_recursion_depth++;
 
 			return;
 		}
 
-		elem = linitial(call_stack);
+		elem = linitial(cg_graph.call_stack);
 
 		/*
 		 * Calculate the self time we spent in the previous function
 		 * (elem->key.callee in this case).
 		 */
-		INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
+		INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, cg_graph.current_self_time_start);
 
 		key.caller_nspname = elem->key.callee_nspname;
 		key.caller_signature = elem->key.callee_signature;
+
+		/* look up info for the new function */
+		oldctx = MemoryContextSwitchTo(cg_memory_ctx);
+		cg_lookup_function(fnoid, &key.callee_nspname, &key.callee_signature);
+		MemoryContextSwitchTo(oldctx);
 	}
 
-	oldctx = MemoryContextSwitchTo(cg_memory_ctx);
-	cg_lookup_function(fnoid, &key.callee_nspname, &key.callee_signature);
-	MemoryContextSwitchTo(oldctx);
-
-	elem = hash_search(edge_hash_table, (void *) &key, HASH_ENTER, &found);
+	elem = hash_search(cg_graph.edge_hash_table, (void *) &key, HASH_ENTER, &found);
 	if (found)
 		elem->num_calls++;
 	else
@@ -443,17 +513,105 @@ cg_enter_function(Oid fnoid, instr_time current_time)
 		INSTR_TIME_SET_ZERO(elem->self_time);
 	}
 
-	call_stack = lcons(elem, call_stack);
+	cg_graph.call_stack = lcons(elem, cg_graph.call_stack);
 
 	INSTR_TIME_SET_CURRENT(elem->total_time_start);
-	memcpy(&current_self_time_start, &elem->total_time_start, sizeof(instr_time));
+	memcpy(&cg_graph.current_self_time_start, &elem->total_time_start, sizeof(instr_time));
 }
+
+static void
+cg_exit_function(Oid fnoid, instr_time current_time, bool aborted)
+{
+	EdgeHashElem *elem;
+
+	/*
+	 * If we're not tracking this particular graph, we only need to see whether
+	 * we're done with the graph or not.
+	 */
+	if (!cg_tracking_current_graph)
+	{
+		if (cg_top_level_function_oid == fnoid)
+		{
+			cg_recursion_depth--;
+			if (cg_recursion_depth == 0)
+				cg_top_level_function_oid = InvalidOid;
+		}
+
+		return;
+	}
+
+	elem = linitial(cg_graph.call_stack);
+	INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, cg_graph.current_self_time_start);
+	INSTR_TIME_ACCUM_DIFF(elem->total_time, current_time, elem->total_time_start);
+
+	cg_graph.call_stack = list_delete_first(cg_graph.call_stack);
+
+	if (cg_graph.call_stack != NIL)
+	{
+		/*
+		 * We're going back to the previous node, start recording its
+		 * self_time.
+		 */
+		INSTR_TIME_SET_CURRENT(cg_graph.current_self_time_start);
+		return;
+	}
+
+	/*
+	 * At this point we're done with the graph.  If the top level function
+	 * exited cleanly, we can process the data we've gathered in the hash table
+	 * and add that data into the buffer table.
+	 */
+	if (!aborted)
+	{
+		Oid save_userid;
+		int save_sec_context;
+		bool save_enable_call_graph;
+
+		/*
+		 * Temporarily disable call graph to allow triggers on the target
+		 * tables.
+		 */
+		save_enable_call_graph = enable_call_graph;
+		enable_call_graph = false;
+
+		/*
+		 * Also temporarily become the call_graph user to be able to INSERT
+		 * into the call_graph schema.
+		 */
+		GetUserIdAndSecContext(&save_userid, &save_sec_context);
+		SetUserIdAndSecContext(cg_graph.cg_user_oid, SECURITY_LOCAL_USERID_CHANGE);
+
+		/*
+		 * It is in some cases possible that process_edge_data() throws an
+		 * exception.  We really need to clean up our state in case that
+		 * happens.
+		 */
+		PG_TRY();
+		{
+			Datum buffer_id = cg_assign_callgraph_buffer_id();
+
+			cg_process_edge_data(buffer_id);
+			SetUserIdAndSecContext(save_userid, save_sec_context);
+			enable_call_graph = save_enable_call_graph;
+		}
+		PG_CATCH();
+		{
+			SetUserIdAndSecContext(save_userid, save_sec_context);
+			enable_call_graph = save_enable_call_graph;
+			cg_release_graph_state();
+
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+
+	cg_release_graph_state();
+}
+
 
 static void
 cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args)
 {
-	bool aborted = false;
-	EdgeHashElem *elem;
 	instr_time current_time;
 
 	if (next_fmgr_hook)
@@ -467,86 +625,14 @@ cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args)
 			cg_enter_function(flinfo->fn_oid, current_time);
 			break;
 
-		/*
-		 * In both ABORT and END cases we pop off the last element from the
-		 * call stack.  If we didn't abort and the stack is empty, we process
-		 * the data we gathered.  Unfortunately we can't process any data if an
-		 * exception is raised as we're in a failed transaction.
-		 */
 		case FHET_ABORT:
-			aborted = true;
+			cg_exit_function(flinfo->fn_oid, current_time, true);
+			break;
 
 		case FHET_END:
-			/*
-			 * If we're not tracking this particular graph, we only need to see
-			 * whether we're done with the graph or not.
-			 */
-			if (!tracking_current_graph)
-			{
-				if (top_level_function_oid == flinfo->fn_oid)
-				{
-					recursion_depth--;
-					if (recursion_depth == 0)
-						top_level_function_oid = InvalidOid;
-				}
-
-				return;
-			}
-
-			elem = linitial(call_stack);
-			INSTR_TIME_ACCUM_DIFF(elem->self_time, current_time, current_self_time_start);
-			INSTR_TIME_ACCUM_DIFF(elem->total_time, current_time, elem->total_time_start);
-
-			call_stack = list_delete_first(call_stack);
-
-			if (call_stack != NIL)
-			{
-				/*
-				 * We're going back to the previous node, start recording its
-				 * self_time.
-				 */
-				INSTR_TIME_SET_CURRENT(current_self_time_start);
-				break;
-			}
-
-			/*
-			 * At this point we're done with the graph.  If the top level
-			 * function exited cleanly, we can process the data we've gathered
-			 * in the hash table and add that data into the buffer table.
-			 */
-			if (!aborted)
-			{
-				/*
-				 * Temporarily disable call graph to allow triggers on the
-				 * target tables.
-				 */
-				bool save_enable_call_graph = enable_call_graph;
-				enable_call_graph = false;
-
-				/*
-				 * It is in some cases possible that process_edge_data() throws
-				 * an exception.  We really need to clean up our state in case
-				 * that happens.
-				 */
-				PG_TRY();
-				{
-					Datum buffer_id = cg_assign_callgraph_buffer_id();
-
-					cg_process_edge_data(buffer_id);
-					enable_call_graph = save_enable_call_graph;
-				}
-				PG_CATCH();
-				{
-					enable_call_graph = save_enable_call_graph;
-					cg_release_graph_state();
-					PG_RE_THROW();
-				}
-				PG_END_TRY();
-			}
-
-			cg_release_graph_state();
-
+			cg_exit_function(flinfo->fn_oid, current_time, false);
 			break;
+
 		default:
 			elog(ERROR, "Unknown FmgrHookEventType %d", event);
 			return;
