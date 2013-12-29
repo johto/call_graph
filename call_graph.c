@@ -132,38 +132,41 @@ cg_needs_fmgr_hook(Oid functionId)
 static void
 cg_release_graph_state()
 {
-	Assert(cg_graph.call_stack == NIL);
-
+	cg_graph.call_stack = NIL;
 	cg_destroy_edge_hash_table();
+	cg_graph.nspname = NULL;
+	cg_graph.signature = NULL;
+	cg_graph.rolname = NULL;
+
 	cg_tracking_current_graph = false;
 
 	MemoryContextReset(cg_memory_ctx);
 }
 
-static bool
+static void
 cg_init_graph_state(Oid fnoid)
 {
 	MemoryContext oldctx;
 
-	cg_graph.cg_user_oid = get_role_oid("call_graph", true);
-	if (!OidIsValid(cg_graph.cg_user_oid))
-	{
-		elog(WARNING, "could not find user \"call_graph\", but call_graph is enabled");
-		return false;
-	}
-
 	oldctx = MemoryContextSwitchTo(cg_memory_ctx);
 
-	/* TODO: fail nicely if something goes wrong in this section */
-	cg_create_edge_hash_table();
-	cg_lookup_function(fnoid, &cg_graph.nspname, &cg_graph.signature);
-	cg_graph.rolname = GetUserNameFromId(GetOuterUserId());
+	PG_TRY();
+	{
+		cg_create_edge_hash_table();
+		cg_lookup_function(fnoid, &cg_graph.nspname, &cg_graph.signature);
+		cg_graph.rolname = GetUserNameFromId(GetOuterUserId());
+		cg_graph.cg_user_oid = get_role_oid("call_graph", false);
+	}
+	PG_CATCH();
+	{
+		cg_release_graph_state();
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	MemoryContextSwitchTo(oldctx);
 
 	cg_tracking_current_graph = true;
-
-	return true;
 }
 
 static uint32
@@ -453,13 +456,15 @@ cg_enter_function(Oid fnoid, instr_time current_time)
 		 * initialize the per-graph state, abandon any attempts at trying to
 		 * track the current graph.
 		 */
-		if (!enable_call_graph || !cg_init_graph_state(fnoid))
+		if (!enable_call_graph)
 		{
 			cg_top_level_function_oid = fnoid;
 			cg_tracking_current_graph = false;
 			cg_recursion_depth = 1;
 			return;
 		}
+
+		cg_init_graph_state(fnoid);
 
 		key.caller_nspname = NULL;
 		key.caller_signature = NULL;
@@ -645,8 +650,9 @@ cg_fmgr_hook(FmgrHookEventType event, FmgrInfo *flinfo, Datum *args)
 void
 _PG_init(void)
 {
+	/* must be loaded via shared_preload_libraries */
 	if (!process_shared_preload_libraries_in_progress)
-		elog(ERROR, "please no");
+		elog(ERROR, "call_graph must be loaded via shared_preload_libraries");
 
 	DefineCustomBoolVariable("call_graph.enable",
 							 "Enables real-time tracking of function calls.",
