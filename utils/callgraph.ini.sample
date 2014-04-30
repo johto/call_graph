@@ -105,7 +105,7 @@ NodeShape = CASE WHEN NodeIsSubGraphEntryFunction THEN 'box' ELSE 'ellipse' END
 
 ; Make the box dashed when it is a subgraph "reference" within another graph, but keep it solid when
 ; rendering the actual subgraph.
-NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END 
+NodeStyle = CASE WHEN NodeIsSubGraphEntryFunction AND NOT NodeIsGraphEntryFunction THEN 'dashed' ELSE 'solid' END
 
 ; Generate per-function graphs (but see the documentation at the beginning of this file)
 GeneratePerFunctionGraphs = yes
