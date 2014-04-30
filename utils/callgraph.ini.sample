@@ -97,7 +97,7 @@
 EdgeColor = text '#' || CASE WHEN AvgSelfTime >= 0.7*MaxAvgSelfTime THEN lpad(to_hex(100 + (((AvgSelfTime-0.7*MaxAvgSelfTime) / ((1 - 0.7)*MaxAvgSelfTime))*125)::int), 2, '0')||'0000' ELSE repeat(lpad(to_hex(215 - (AvgSelfTime / (0.7*MaxAvgSelfTime) * 215)::int), 2, '0'), 3) END
 
 ; Show the more expensive paths in bold
-EdgePenWidth = GREATEST((TotalTotalTime / MaxTotalTotalTime) * 5.0, 1.0)
+EdgePenWidth = GREATEST((TotalTotalTime / NULLIF(MaxTotalTotalTime, 0.0)) * 5.0, 1.0)
 
 
 ; All nodes which are subgraph entry functions should be boxes.
