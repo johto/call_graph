@@ -178,7 +178,7 @@ sub parse_boolean
 	if ($value eq 'yes' || $value eq '1' || $value eq 'true')
 		{ $params->{$param_name} = 1; }
 	elsif ($value eq 'no' || $value eq '0' || $value eq 'false')
-		{ $params->{$param_name} = 0; } 
+		{ $params->{$param_name} = 0; }
 	else
 		{ die "Unrecognized input \"$value\" for $param_name"; }
 }
@@ -199,7 +199,7 @@ sub parse_config_file
 		die "Syntax error on line $. in $filename\n" if ($line !~ $parser);
 
 		next if (!defined $4);
-		
+
 		# remember to check for SubGraphs separately
 		die "Unrecognized configuration parameter \"$4\"\n" if ($4 ne 'SubGraphs' && !exists $params->{$4});
 		$params->{$4} = $5;
@@ -295,7 +295,7 @@ my $system_catalogs = { pg_proc			=> $params{PgProcReplacement},
 						pg_class		=> $params{PgClassReplacement},
 						pg_namespace	=> $params{PgNamespaceReplacement} };
 
-my $subgraph_params_query = 
+my $subgraph_params_query =
 <<"SQL";
 CREATE TEMPORARY TABLE SubGraphParams
 	(TopLevelFunction, EntryFunction, SubGraphID)
@@ -377,7 +377,7 @@ SubGraphEdgeWorkTable (EdgeID, CallGraphID, SubGraphID, Callee, SeenEdges, Shoul
 		SubGraphEdgeWorkTable
 	JOIN
 		call_graph.Edges
-			ON (SubGraphEdgeWorkTable.Callee = Edges.Caller AND SubGraphEdgeWorkTable.CallGraphID = Edges.CallGraphID) 
+			ON (SubGraphEdgeWorkTable.Callee = Edges.Caller AND SubGraphEdgeWorkTable.CallGraphID = Edges.CallGraphID)
 	JOIN
 		call_graph.CallGraphs
 			ON (CallGraphs.CallGraphID = Edges.CallGraphID)
@@ -407,7 +407,7 @@ LEFT JOIN
 SQL
 ;
 
-my $edgedata_query = 
+my $edgedata_query =
 <<"SQL";
 SELECT
 	GraphID,
@@ -443,7 +443,7 @@ FROM
 			GraphID, Caller, Callee, sum(Edges.Calls) AS EdgeNumCalls,
 			sum(Edges.SelfTime) / sum(Edges.Calls) AS AvgSelfTime, sum(Edges.SelfTime) AS TotalSelfTime,
 			sum(Edges.TotalTime) / sum(Edges.Calls) AS AvgTotalTime, sum(Edges.TotalTime) AS TotalTotalTime,
-			count(*) AS NumPresent, 
+			count(*) AS NumPresent,
 			(SELECT count(*) FROM call_graph.CallGraphs cg3 WHERE cg3.TopLevelFunction = Edges.TopLevelFunction) AS NumGraphs
 		FROM
 			pg_temp.Edges
@@ -455,7 +455,7 @@ FROM
 
 	WINDOW w AS (PARTITION BY GraphID)
 ) ss2
-	
+
 -- add labels for the nodes
 UNION ALL
 SELECT
@@ -493,7 +493,7 @@ FROM
 			-- since if there are any subgraph edges in the Edges CTE, we can assume them to be visible.
 			EdgeType = 's' OR
 			EXISTS (SELECT * FROM Edges e2 WHERE e2.caller = Edges.TopLevelFunction AND e2.GraphID = Edges.GraphID)
-		
+
 		UNION ALL
 
 		-- also need labels for the entry points into subgraphs
@@ -615,7 +615,7 @@ LEFT JOIN
 			sum(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.TotalTime END) AS TotalTimeCurrentHour,
 			min(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.FirstCall END) AS FirstCallCurrentHour,
 			max(CASE WHEN Hourly.DateStamp = date_trunc('hour', now()) THEN Hourly.LastCall END) AS LastCallCurrentHour,
-	
+
 			sum(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.Calls END) AS CallsPreviousHour,
 			sum(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.TotalTime END) AS TotalTimePreviousHour,
 			min(CASE WHEN Hourly.DateStamp < date_trunc('hour', now()) THEN Hourly.FirstCall END) AS FirstCallPreviousHour,
@@ -805,12 +805,12 @@ my $subgraphs = {};
 foreach my $graphid (keys %{$graphs})
 {
 	my $graph = $graphs->{$graphid};
-	next if (!$graph->{issubgraph});	
+	next if (!$graph->{issubgraph});
 	next if ($graph->{totalcalls} == 0);
 
 	my $parent = $graph->{parentgraphentryfunctionoid};
 	$subgraphs->{$parent} = [] if (!exists $subgraphs->{$parent});
-	
+
 	push @{$subgraphs->{$parent}}, $graphid;
 }
 
