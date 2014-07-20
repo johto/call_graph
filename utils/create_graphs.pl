@@ -446,7 +446,7 @@ FROM
 			count(*) AS NumPresent, 
 			(SELECT count(*) FROM call_graph.CallGraphs cg3 WHERE cg3.TopLevelFunction = Edges.TopLevelFunction) AS NumGraphs
 		FROM
-			Edges
+			pg_temp.Edges
 		WHERE
 			Caller <> 0
 		GROUP BY
@@ -487,7 +487,7 @@ FROM
 			TopLevelFunction,
 			Caller = 0 AS NodeIsGraphEntryFunction
 		FROM
-			Edges
+			pg_temp.Edges
 		WHERE
 			-- Don't display top level functions with no children.  We can skip this check for subgraphs
 			-- since if there are any subgraph edges in the Edges CTE, we can assume them to be visible.
@@ -503,7 +503,7 @@ FROM
 			TopLevelFunction,
 			TRUE AS NodeIsGraphEntryFunction
 		FROM
-			SubGraphParams
+			pg_temp.SubGraphParams
 	) Edges
 	JOIN
 		$system_catalogs->{pg_proc} proclookup
