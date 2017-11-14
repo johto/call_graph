@@ -14,6 +14,7 @@
 #include "utils/hsearch.h"
 #include "utils/tqual.h"
 #include "utils/memutils.h"
+#include "utils/regproc.h"
 #include "storage/shmem.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
